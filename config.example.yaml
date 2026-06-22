@@ -1,0 +1,127 @@
+# Copy to config.yaml — never commit config.yaml or secrets files to git.
+
+database: /mnt/storage/docker/scripts/librarry/librarry.db
+state_dir: /mnt/storage/docker/scripts/librarry/state
+log_dir: /mnt/storage/docker/scripts/librarry/logs
+
+library_dir: /mnt/storage/books
+download_dir: /mnt/storage/downloads
+download_subdir: books
+
+webui:
+  enabled: true
+  host: 0.0.0.0
+  port: 5300
+
+# Encrypted credential store (created by: librarry secrets init)
+secrets:
+  vault: /mnt/storage/docker/scripts/librarry/state/secrets.vault
+  key_file: /mnt/storage/docker/scripts/librarry/state/secrets.key
+
+hardcover:
+  api_url: https://api.hardcover.app/v1/graphql
+  want_status_id: 1
+  token: secret:hardcover_token
+  # Be a polite API citizen — throttle all Hardcover calls (sync + search)
+  # so we don't overload their server or get rate-limited/banned.
+  rate_limit_per_minute: 60
+  min_interval_seconds: 1.0
+
+newznab_indexers:
+  - name: NZBGeek
+    host: https://api.nzbgeek.info
+    api_key: secret:nzbgeek_api_key
+    book_categories: [7020]
+    enabled: true
+    priority: 10
+
+torznab_indexers:
+  - name: Jackett All
+    host: http://192.168.1.212:9117/api/v2.0/indexers/all/results/torznab
+    api_key: secret:jackett_api_key
+    book_categories: [7020]
+    enabled: true
+    priority: 5
+
+download_clients:
+  usenet:
+    type: sabnzbd
+    host: 192.168.1.212
+    port: 8081
+    username: secret:sab_user
+    password: secret:sab_password
+    api_key: secret:sab_api_key
+    category: books
+    delete_after: false
+    enabled: true
+    priority: 10
+  torrent:
+    type: qbittorrent
+    host: 192.168.1.212
+    port: 8080
+    username: secret:qbit_user
+    password: secret:qbit_password
+    category: books
+    save_path: /downloads/books
+    enabled: true
+    priority: 5
+
+providers:
+  libgen:
+    enabled: true
+    max_per_run: 12
+    requeue_after_hours: 12
+  annas:
+    enabled: false          # Anna's Archive — search is free; fast downloads need a member key
+    max_per_run: 8
+    api_key: secret:annas_api_key   # set via: librarry secrets set annas_api_key
+
+quality:
+  ebook:
+    required_extensions: [epub, azw3, mobi]
+    acceptable_extensions: [pdf, fb2]
+    reject_extensions: [m4a, mp3, m4b, flac]
+    reject_patterns:
+      - study guide
+      - summary
+      - cliffnotes
+      - workbook
+      - unabr
+      - audiobook
+    prefer_patterns:
+      - retail
+      - epub
+      - ebook
+
+search:
+  fuzz_threshold: 0.45
+  max_results_per_indexer: 25
+  usenet_before_torrent: true
+
+run:
+  max_snatches_per_run: 5
+  max_imports_per_run: 10
+
+import:
+  file_mode: hardlink
+  send_kindle: false
+  optimize_metadata: true   # embed cover + metadata into ebooks for clean Kindle display
+
+kindle:
+  smtp_server: smtp.gmail.com
+  smtp_port: 465
+  use_ssl: true
+  from: secret:kindle_smtp_from
+  to: you@kindle.com
+  user: secret:kindle_smtp_user
+  password: secret:kindle_smtp_password
+
+# Optional: external vault instead of/in addition to local secrets
+# openbao:
+#   addr: http://192.168.1.251:8200
+#   creds_file: /path/to/openbao.creds
+# hardcover:
+#   token: openbao:secret/hardcover_token#hardcover_token
+
+# Legacy env var references still work:
+#   api_key: env:NZBGEEK_API_KEY

@@ -1,0 +1,15 @@
+[Unit]
+Description=Librarry ebook orchestrator web UI
+After=network.target
+
+[Service]
+Type=simple
+User=dduggan
+WorkingDirectory=/mnt/storage/docker/scripts/librarry
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dduggan/.local/bin/librarry serve --config /mnt/storage/docker/scripts/librarry/config.yaml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# Librarry pipeline — run sync/search/poll/libgen/import every 30 minutes
+*/30 * * * * root docker exec -e LIBRARRY_CONFIG=/config/config.yaml librarry librarry run >> /mnt/storage/docker/scripts/librarry/logs/cron.log 2>&1

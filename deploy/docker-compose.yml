@@ -1,0 +1,28 @@
+services:
+  librarry:
+    image: python:3.12-slim
+    container_name: librarry
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - |
+        pip install -q -e /app
+        librarry init
+        python /app/deploy/bootstrap-mediaprod.py || true
+        exec librarry serve --host 0.0.0.0 --port 5300
+    ports:
+      - "5300:5300"
+    volumes:
+      - /mnt/storage/docker/scripts/librarry:/app
+      - /mnt/storage/docker/scripts/librarry/config.yaml:/config/config.yaml
+      - /mnt/storage/docker/scripts/librarry/state:/mnt/storage/docker/scripts/librarry/state
+      - /mnt/storage/docker/scripts/librarry/logs:/mnt/storage/docker/scripts/librarry/logs
+      - /mnt/storage/docker/scripts/hardcover_sync.creds:/secrets/hardcover_sync.creds:ro
+      - /mnt/storage/docker/lazylibrarian/config/config.ini:/secrets/lazylibrarian.ini:ro
+      - /mnt/storage/books:/mnt/storage/books
+      - /mnt/storage/downloads:/mnt/storage/downloads
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LIBRARRY_CONFIG: /config/config.yaml

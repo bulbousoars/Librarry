@@ -1,0 +1,25 @@
+# Secrets and local config — never commit
+config.yaml
+**/secrets.vault
+**/secrets.key
+**/openbao.creds
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.eggs/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+
+# Logs and state
+logs/
+state/
+*.log
+
+# IDE
+.idea/
+.vscode/

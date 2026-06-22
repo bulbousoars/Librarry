@@ -1,0 +1,18 @@
+# Traefik routes for librarry.dugganco.com
+# Append to /mnt/storage/docker/traefik/dynamic/internal-services.yml on docker-infra (.111)
+# under http.routers and http.services (same pattern as library/sonarr).
+
+# Router (add alongside library:):
+#    librarry:
+#      rule: 'Host(`librarry.dugganco.com`)'
+#      entrypoints: [websecure]
+#      tls:
+#        certResolver: cloudflare
+#      middlewares: [authentik@file]
+#      service: librarry
+
+# Service:
+#    librarry:
+#      loadBalancer:
+#        servers:
+#          - url: 'http://192.168.1.212:5300'
