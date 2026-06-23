@@ -65,6 +65,29 @@ class SecretsConfig:
 
 
 @dataclass
+class OIDCConfig:
+    enabled: bool = False
+    issuer: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    scopes: list[str] = field(default_factory=lambda: ["openid", "email", "profile"])
+
+
+@dataclass
+class LocalAdminConfig:
+    enabled: bool = True
+
+
+@dataclass
+class AuthConfig:
+    enabled: bool = False
+    session_secret: str = ""
+    oidc: OIDCConfig = field(default_factory=OIDCConfig)
+    local_admin: LocalAdminConfig = field(default_factory=LocalAdminConfig)
+
+
+@dataclass
 class AppConfig:
     database: Path
     state_dir: Path
@@ -107,6 +130,7 @@ class AppConfig:
     webui_enabled: bool
     webui_host: str
     webui_port: int
+    auth: AuthConfig
     raw: dict[str, Any]
 
 
@@ -203,6 +227,9 @@ def load_config(path: str | Path) -> AppConfig:
     sec_raw = raw.get("secrets", {})
     openbao = raw.get("openbao", {})
     webui = raw.get("webui", {})
+    auth = raw.get("auth", {}) or {}
+    oidc = auth.get("oidc", {}) or {}
+    local_admin = auth.get("local_admin", {}) or {}
 
     vault_path = Path(sec_raw.get("vault", state_dir / "secrets.vault"))
     key_file_raw = sec_raw.get("key_file")
@@ -267,5 +294,20 @@ def load_config(path: str | Path) -> AppConfig:
         webui_enabled=bool(webui.get("enabled", True)),
         webui_host=str(webui.get("host", "0.0.0.0")),
         webui_port=int(webui.get("port", 5300)),
+        auth=AuthConfig(
+            enabled=bool(auth.get("enabled", False)),
+            session_secret=resolver.resolve_field(auth, "session_secret", "session_secret_secret", "session_secret_env", default=""),
+            oidc=OIDCConfig(
+                enabled=bool(oidc.get("enabled", False)),
+                issuer=str(oidc.get("issuer", "")).rstrip("/"),
+                client_id=resolver.resolve_field(oidc, "client_id", "client_id_secret", "client_id_env", default=""),
+                client_secret=resolver.resolve_field(oidc, "client_secret", "client_secret_secret", "client_secret_env", default=""),
+                redirect_uri=str(oidc.get("redirect_uri", "")),
+                scopes=list(oidc.get("scopes", ["openid", "email", "profile"])),
+            ),
+            local_admin=LocalAdminConfig(
+                enabled=bool(local_admin.get("enabled", True)),
+            ),
+        ),
         raw=raw,
     )

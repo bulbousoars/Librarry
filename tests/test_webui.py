@@ -100,6 +100,51 @@ torznab_indexers: []
         assert "counts" in r2.json()
 
 
+def test_webui_auth_requires_session_and_local_admin_login_allows_access():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        db_path = root / "legacy.db"
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {db_path.as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+  local_admin:
+    enabled: true
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        app.state.users.upsert_local_admin("admin", "pw")
+        client = TestClient(app)
+
+        assert client.get("/api/status").status_code == 401
+        bad = client.post("/auth/local", json={"username": "admin", "password": "bad"})
+        assert bad.status_code == 401
+
+        login = client.post("/auth/local", json={"username": "admin", "password": "pw"})
+        assert login.status_code == 200
+        assert login.json()["user"]["is_admin"] is True
+        assert client.get("/api/status").status_code == 200
+
+
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"
     config = root / "config.yaml"

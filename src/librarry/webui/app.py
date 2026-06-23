@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import contextvars
+import hashlib
+import hmac
+import json
 import re
 from dataclasses import asdict
 from datetime import datetime
@@ -8,13 +13,14 @@ from typing import Any
 
 import requests
 import yaml
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from librarry import __version__, hardcover
 from librarry.hardcover import HardcoverRateLimited
 from librarry.config import AppConfig, load_config
 from librarry.db import Database
+from librarry.users import User, UserStore
 from librarry.workers.check import run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
 from librarry.workers.import_book import import_ready, scan_library
@@ -32,6 +38,10 @@ _ACTIONS = {
     "libgen": fetch_libgen,
     "import": import_ready,
 }
+
+_current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_user", default=None)
+
+SESSION_COOKIE = "librarry_session"
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -106,16 +116,97 @@ def _importlists_view(raw: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign_session(payload: dict[str, Any], secret: str) -> str:
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{_b64url(sig)}"
+
+
+def _unsign_session(value: str, secret: str) -> dict[str, Any] | None:
+    try:
+        body, sig = value.split(".", 1)
+        expected = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64url(expected), sig):
+            return None
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _user_json(user: User) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "auth_type": user.auth_type,
+        "email": user.email,
+        "display_name": user.display_name,
+        "username": user.username,
+        "enabled": user.enabled,
+        "is_admin": user.is_admin,
+        "setup_complete": user.setup_complete,
+    }
+
+
 def create_app(config_path: str) -> FastAPI:
     cfg = load_config(config_path)
     db = Database(cfg.database)
     db.init()
+    users = UserStore(cfg.state_dir / "users.db", cfg.state_dir / "users")
+    users.init()
 
     app = FastAPI(title="Librarry", version=__version__)
     app.state.config_path = config_path
     app.state.cfg = cfg
     app.state.db = db
+    app.state.users = users
     app.state.last_action: dict[str, Any] = {}
+
+    def _auth_enabled() -> bool:
+        return bool(app.state.cfg.auth.enabled)
+
+    def _session_secret() -> str:
+        secret = app.state.cfg.auth.session_secret
+        if not secret:
+            raise HTTPException(500, "auth.session_secret is required when auth is enabled")
+        return secret
+
+    def _current() -> User | None:
+        return _current_user.get()
+
+    @app.middleware("http")
+    async def _auth_middleware(request: Request, call_next):
+        token = None
+        user: User | None = None
+        if _auth_enabled():
+            raw = request.cookies.get(SESSION_COOKIE)
+            if raw:
+                payload = _unsign_session(raw, _session_secret())
+                user_id = str((payload or {}).get("user_id") or "")
+                if user_id:
+                    found = app.state.users.get_user(user_id)
+                    if found and found.enabled:
+                        user = found
+                        token = _current_user.set(user)
+            public = (
+                request.url.path == "/"
+                or request.url.path.startswith("/auth/")
+                or request.url.path.startswith("/favicon.")
+            )
+            if request.url.path.startswith("/api/") and not public and user is None:
+                return JSONResponse({"detail": "authentication required"}, status_code=401)
+        try:
+            return await call_next(request)
+        finally:
+            if token is not None:
+                _current_user.reset(token)
 
     def _reload_cfg() -> AppConfig:
         cfg = load_config(config_path)
@@ -297,6 +388,38 @@ def create_app(config_path: str) -> FastAPI:
     @app.get("/favicon.ico")
     def favicon() -> Response:
         return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
+
+    # ----- auth -----
+
+    @app.get("/auth/me")
+    def auth_me() -> dict[str, Any]:
+        user = _current()
+        return {"authenticated": bool(user), "user": _user_json(user) if user else None}
+
+    @app.post("/auth/local")
+    def auth_local(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+        if not _auth_enabled() or not app.state.cfg.auth.local_admin.enabled:
+            raise HTTPException(404, "local admin login is not enabled")
+        username = str(payload.get("username", "")).strip()
+        password = str(payload.get("password", ""))
+        user = app.state.users.verify_local_admin(username, password)
+        if not user:
+            raise HTTPException(401, "invalid username or password")
+        response = JSONResponse({"authenticated": True, "user": _user_json(user)})
+        response.set_cookie(
+            SESSION_COOKIE,
+            _sign_session({"user_id": user.id, "auth_type": "local"}, _session_secret()),
+            httponly=True,
+            samesite="lax",
+            secure=False,
+        )
+        return response
+
+    @app.post("/auth/logout")
+    def auth_logout() -> JSONResponse:
+        response = JSONResponse({"authenticated": False})
+        response.delete_cookie(SESSION_COOKIE)
+        return response
 
     # ----- core data -----
 
