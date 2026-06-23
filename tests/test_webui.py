@@ -680,6 +680,34 @@ torznab_indexers: []
         assert sent["kindle_to"] == "reader@kindle.com"
         assert sent["send_kindle"] is True
 
+        # The resend is recorded in the Send-to-Kindle history.
+        history = client.get("/api/kindle/history").json()["sends"]
+        assert len(history) == 1
+        entry = history[0]
+        assert entry["title"] == "Book"
+        assert entry["status"] == "sent"
+        assert entry["source"] == "resend"
+        assert entry["kindle_to"] == "reader@kindle.com"
+
+
+def test_kindle_send_history_records_and_orders():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        db = create_app(str(config)).state.db
+        db.log_kindle_send(title="First", author="A", book_id="b1",
+                           kindle_to="x@kindle.com", status="sent", source="import")
+        db.log_kindle_send(title="Second", author="B", book_id="b2",
+                           kindle_to="x@kindle.com", status="failed",
+                           detail="smtp boom", source="resend")
+        sends = db.list_kindle_sends()
+        assert len(sends) == 2
+        assert {s["title"] for s in sends} == {"First", "Second"}
+        failed = next(s for s in sends if s["title"] == "Second")
+        assert failed["status"] == "failed"
+        assert failed["detail"] == "smtp boom"
+        assert failed["source"] == "resend"
+
 
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"

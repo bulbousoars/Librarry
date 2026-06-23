@@ -8,7 +8,7 @@ from pathlib import Path
 
 from librarry.config import AppConfig
 from librarry.db import Database
-from librarry.kindle import send_to_kindle
+from librarry.kindle import is_loggable_send, send_to_kindle
 from librarry.metadata import optimize_ebook
 from librarry.quality import detect_extension
 
@@ -151,20 +151,31 @@ def import_ready(cfg: AppConfig, db: Database, *, kindle_settings=None) -> dict[
                         pass
             db.mark_imported(book.id, str(dest_file), ext)
             log.info("Imported %r -> %s", book.title, dest_file)
+            kindle_to = kindle_settings.kindle_to if kindle_settings is not None else getattr(cfg, "kindle_to", "")
             try:
                 if kindle_settings is not None:
-                    send_to_kindle(
+                    status = send_to_kindle(
                         cfg,
                         dest_file,
                         title=book.title,
                         author=book.author,
                         kindle_to=kindle_settings.kindle_to,
                         send_kindle=kindle_settings.send_kindle,
-                    )
+                    ) or "sent"
                 else:
-                    send_to_kindle(cfg, dest_file, title=book.title, author=book.author)
+                    status = send_to_kindle(cfg, dest_file, title=book.title, author=book.author) or "sent"
             except Exception as exc:
                 log.error("Kindle send failed for %r: %s", book.title, exc)
+                db.log_kindle_send(
+                    book_id=book.id, title=book.title, author=book.author,
+                    kindle_to=kindle_to or "", status="failed", detail=str(exc), source="import",
+                )
+            else:
+                if is_loggable_send(status):
+                    db.log_kindle_send(
+                        book_id=book.id, title=book.title, author=book.author,
+                        kindle_to=kindle_to or "", status=status, source="import",
+                    )
             imported += 1
         except Exception as exc:
             log.error("Import failed for %r: %s", book.title, exc)

@@ -13,6 +13,14 @@ log = logging.getLogger(__name__)
 
 KINDLE_MAX_BYTES = 49 * 1024 * 1024  # Amazon ~50MB limit
 
+# Statuses worth recording in the send history (skip the noisy config states
+# "skipped_disabled" / "skipped_no_creds").
+LOGGABLE_SEND_STATUSES = {"sent", "failed", "skipped_too_large"}
+
+
+def is_loggable_send(status: str) -> bool:
+    return status in LOGGABLE_SEND_STATUSES
+
 
 def send_to_kindle(
     cfg: AppConfig,
@@ -22,14 +30,18 @@ def send_to_kindle(
     author: str,
     kindle_to: str | None = None,
     send_kindle: bool | None = None,
-) -> None:
+) -> str:
+    """Email a book to Kindle. Returns a status string:
+    "sent", "skipped_disabled", "skipped_no_creds", or "skipped_too_large".
+    Raises on an actual SMTP/delivery failure.
+    """
     enabled = cfg.send_kindle if send_kindle is None else send_kindle
     recipient = cfg.kindle_to if kindle_to is None else kindle_to
     if not enabled:
-        return
+        return "skipped_disabled"
     if not recipient or not cfg.kindle_smtp_user or not cfg.kindle_smtp_password:
         log.warning("Kindle send enabled but SMTP credentials incomplete; skipping")
-        return
+        return "skipped_no_creds"
 
     size = book_path.stat().st_size
     if size > KINDLE_MAX_BYTES:
@@ -38,7 +50,7 @@ def send_to_kindle(
             title,
             size // (1024 * 1024),
         )
-        return
+        return "skipped_too_large"
 
     msg = EmailMessage()
     msg["Subject"] = title
@@ -67,3 +79,4 @@ def send_to_kindle(
             smtp.send_message(msg)
 
     log.info("Sent %r to Kindle (%s)", title, recipient)
+    return "sent"

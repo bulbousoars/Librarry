@@ -85,6 +85,20 @@ CREATE TABLE IF NOT EXISTS author_bibliography (
 );
 
 CREATE INDEX IF NOT EXISTS idx_author_bibliography_author ON author_bibliography(author);
+
+CREATE TABLE IF NOT EXISTS kindle_sends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id TEXT,
+    title TEXT NOT NULL,
+    author TEXT,
+    kindle_to TEXT,
+    status TEXT NOT NULL,
+    detail TEXT,
+    source TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_kindle_sends_created ON kindle_sends(created_at);
 """
 
 
@@ -526,6 +540,36 @@ class Database:
                     ),
                 )
         return self.list_author_bibliography(author)
+
+    def log_kindle_send(
+        self,
+        *,
+        title: str,
+        author: str = "",
+        book_id: str | None = None,
+        kindle_to: str = "",
+        status: str,
+        detail: str = "",
+        source: str = "",
+    ) -> None:
+        """Record a Send-to-Kindle attempt (sent / failed / skipped_*)."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO kindle_sends (
+                    book_id, title, author, kindle_to, status, detail, source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (book_id, title, author, kindle_to, status, detail, source, utcnow()),
+            )
+
+    def list_kindle_sends(self, limit: int = 100) -> list[dict]:
+        with self.connect(readonly=True) as conn:
+            rows = conn.execute(
+                "SELECT * FROM kindle_sends ORDER BY created_at DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_author_bibliography_item(self, author: str, title: str) -> dict | None:
         with self.connect(readonly=True) as conn:

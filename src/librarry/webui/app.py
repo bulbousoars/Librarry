@@ -22,7 +22,7 @@ from librarry.auth import OIDCClient, OIDCError
 from librarry.hardcover import HardcoverRateLimited
 from librarry.config import AppConfig, load_config
 from librarry.db import Database
-from librarry.kindle import send_to_kindle
+from librarry.kindle import is_loggable_send, send_to_kindle
 from librarry.users import User, UserStore
 from librarry.workers.check import run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
@@ -573,6 +573,11 @@ def create_app(config_path: str) -> FastAPI:
         )
         return response
 
+    @app.get("/api/kindle/history")
+    def api_kindle_history(limit: int = Query(default=100, le=500)) -> dict[str, Any]:
+        _require_user()
+        return {"sends": _db().list_kindle_sends(limit=limit)}
+
     @app.get("/api/kindle/settings")
     def api_kindle_settings() -> dict[str, Any]:
         user = _require_user()
@@ -602,17 +607,26 @@ def create_app(config_path: str) -> FastAPI:
         test_file = test_dir / f"{user.id}.txt"
         test_file.write_text("This is a Librarry Send to Kindle test document.\n", encoding="utf-8")
         try:
-            send_to_kindle(
+            status = send_to_kindle(
                 app.state.cfg,
                 test_file,
                 title="Librarry Test Document",
                 author="Librarry",
                 kindle_to=settings.kindle_to,
                 send_kindle=settings.send_kindle,
-            )
+            ) or "sent"
         except Exception as exc:
             updated = app.state.users.set_kindle_test_status(user.id, f"failed: {exc}")
+            _db().log_kindle_send(
+                title="Librarry Test Document", author="Librarry",
+                kindle_to=settings.kindle_to or "", status="failed", detail=str(exc), source="test",
+            )
             raise HTTPException(500, _kindle_json(updated)) from exc
+        if is_loggable_send(status):
+            _db().log_kindle_send(
+                title="Librarry Test Document", author="Librarry",
+                kindle_to=settings.kindle_to or "", status=status, source="test",
+            )
         return _kindle_json(app.state.users.set_kindle_test_status(user.id, "sent"))
 
     # ----- core data -----
@@ -667,18 +681,27 @@ def create_app(config_path: str) -> FastAPI:
         if not path.is_file():
             raise HTTPException(404, "book file not found")
         try:
-            send_to_kindle(
+            status = send_to_kindle(
                 app.state.cfg,
                 path,
                 title=book.title,
                 author=book.author,
                 kindle_to=settings.kindle_to,
                 send_kindle=settings.send_kindle,
-            )
+            ) or "sent"
         except Exception as exc:
             app.state.users.set_kindle_send_status(effective.id, f"failed: {exc}")
+            _db().log_kindle_send(
+                book_id=book.id, title=book.title, author=book.author,
+                kindle_to=settings.kindle_to or "", status="failed", detail=str(exc), source="resend",
+            )
             raise HTTPException(500, f"Kindle send failed: {exc}") from exc
         app.state.users.set_kindle_send_status(effective.id, f"sent: {book.title}")
+        if is_loggable_send(status):
+            _db().log_kindle_send(
+                book_id=book.id, title=book.title, author=book.author,
+                kindle_to=settings.kindle_to or "", status=status, source="resend",
+            )
         return {"sent": True, "book_id": book.id}
 
     @app.get("/api/books/{book_id:path}")
@@ -2456,7 +2479,42 @@ _PAGE_HTML = """<!DOCTYPE html>
             <div class="hint">Set secrets with: <code>librarry secrets set kindle_smtp_from|kindle_smtp_user|kindle_smtp_password</code></div>
           </div>
           <button class="primary" onclick="VIEWS.saveEmail()">Save</button>
+        </div>
+        <div class="panel">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem">
+            <h3 style="margin:0">Send to Kindle History</h3>
+            <button class="btn-sm" onclick="VIEWS.loadKindleHistory()">Refresh</button>
+          </div>
+          <div class="tablewrap"><table>
+            <thead><tr><th>When</th><th>Title</th><th>Author</th><th>To</th><th>Source</th><th>Status</th></tr></thead>
+            <tbody id="kindle-history-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+          </table></div>
         </div>`;
+      VIEWS.loadKindleHistory();
+    };
+    VIEWS.loadKindleHistory = async () => {
+      const body = document.getElementById('kindle-history-body');
+      if (!body) return;
+      try {
+        const r = await jget('/api/kindle/history?limit=200');
+        const rows = (r.sends || []).map(s => {
+          const ok = s.status === 'sent';
+          const cls = ok ? 'imported' : (s.status === 'failed' ? 'failed' : 'snatched');
+          const label = ok ? 'Sent' : (s.status === 'failed' ? 'Failed' : esc(s.status||''));
+          const detail = s.detail ? ` title="${esc(s.detail)}"` : '';
+          return `<tr>
+            <td>${esc((s.created_at||'').replace('T',' ').slice(0,16))}</td>
+            <td>${esc(s.title||'')}</td>
+            <td>${esc(s.author||'')}</td>
+            <td>${esc(s.kindle_to||'')}</td>
+            <td>${esc(s.source||'')}</td>
+            <td><span class="status status-${cls}"${detail}>${label}</span></td>
+          </tr>`;
+        }).join('');
+        body.innerHTML = rows || '<tr><td colspan="6" class="muted">No Send to Kindle actions recorded yet.</td></tr>';
+      } catch (err) {
+        body.innerHTML = `<tr><td colspan="6" class="muted">Could not load history: ${esc(err.message||'')}</td></tr>`;
+      }
     };
     VIEWS.saveEmail = async () => {
       try {

@@ -37,7 +37,26 @@ def test_send_to_kindle_uses_title_only_for_email_subject(tmp_path, monkeypatch)
         kindle_smtp_port=465,
     )
 
-    send_to_kindle(cfg, book, title="The Way of Kings", author="Brandon Sanderson")
+    status = send_to_kindle(cfg, book, title="The Way of Kings", author="Brandon Sanderson")
 
+    assert status == "sent"
     assert sent["subject"] == "The Way of Kings"
     assert sent["to"] == "reader@kindle.com"
+
+
+def test_send_to_kindle_returns_skip_statuses(tmp_path):
+    book = tmp_path / "book.epub"
+    book.write_bytes(b"epub")
+    disabled = types.SimpleNamespace(
+        send_kindle=False, kindle_to="reader@kindle.com",
+        kindle_smtp_user="u", kindle_smtp_password="p", kindle_from="f",
+        kindle_smtp_ssl=True, kindle_smtp_server="s", kindle_smtp_port=465,
+    )
+    assert send_to_kindle(disabled, book, title="X", author="Y") == "skipped_disabled"
+
+    no_creds = types.SimpleNamespace(
+        send_kindle=True, kindle_to="reader@kindle.com",
+        kindle_smtp_user="", kindle_smtp_password="", kindle_from="",
+        kindle_smtp_ssl=True, kindle_smtp_server="s", kindle_smtp_port=465,
+    )
+    assert send_to_kindle(no_creds, book, title="X", author="Y") == "skipped_no_creds"
