@@ -1462,3 +1462,177 @@ def test_file_explorer_is_sandboxed():
         # path traversal must be blocked
         bad = client.get("/api/files", params={"root": "library", "path": "../../etc"})
         assert bad.status_code in (403, 404)
+
+
+def _english_filter_docs():
+    return [
+        {
+            "key": "/works/OLENG",
+            "title": "English Original",
+            "first_publish_year": 2020,
+            "subject": ["Fiction"],
+            "language": ["eng"],
+            "author_key": ["OL777A"],
+        },
+        {
+            "key": "/works/OLFRE",
+            "title": "French Only",
+            "first_publish_year": 2018,
+            "subject": ["Fiction"],
+            "language": ["fre"],
+            "author_key": ["OL777A"],
+        },
+        {
+            "key": "/works/OLMIX",
+            "title": "Mixed Editions",
+            "first_publish_year": 2019,
+            "subject": ["Fiction"],
+            "language": ["ger", "eng"],
+            "author_key": ["OL777A"],
+        },
+        {
+            "key": "/works/OLUNK",
+            "title": "Unknown Language",
+            "first_publish_year": 2021,
+            "subject": ["Fiction"],
+            "author_key": ["OL777A"],
+        },
+    ]
+
+
+def test_poll_bibliography_filters_to_english_works(monkeypatch):
+    import librarry.webui.app as webapp
+
+    class FakeSearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"docs": _english_filter_docs()}
+
+    class FakeAuthorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def fake_get(url, params=None, timeout=None):
+        if url == "https://openlibrary.org/search.json":
+            return FakeSearchResponse()
+        return FakeAuthorResponse()
+
+    monkeypatch.setattr(webapp.requests, "get", fake_get)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        client = TestClient(create_app(str(config)))
+
+        polled = client.post("/api/authors/Polyglot%20Author/poll-bibliography").json()
+        titles = {row["title"] for row in polled["bibliography"]}
+        # English edition present -> kept; foreign original w/ English edition -> kept;
+        # unknown language -> kept (don't hide real books); French-only -> dropped.
+        assert titles == {"English Original", "Mixed Editions", "Unknown Language"}
+        assert "French Only" not in titles
+
+
+def test_poll_bibliography_all_languages_override(monkeypatch):
+    import librarry.webui.app as webapp
+
+    class FakeSearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"docs": _english_filter_docs()}
+
+    class FakeAuthorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def fake_get(url, params=None, timeout=None):
+        if url == "https://openlibrary.org/search.json":
+            return FakeSearchResponse()
+        return FakeAuthorResponse()
+
+    monkeypatch.setattr(webapp.requests, "get", fake_get)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        client = TestClient(create_app(str(config)))
+
+        polled = client.post(
+            "/api/authors/Polyglot%20Author/poll-bibliography?languages=all"
+        ).json()
+        titles = {row["title"] for row in polled["bibliography"]}
+        assert "French Only" in titles
+        assert len(titles) == 4
+
+
+def test_poll_bibliography_replace_removes_stale_rows(monkeypatch):
+    import librarry.webui.app as webapp
+
+    state = {"call": 0}
+
+    class FakeSearchResponse:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"docs": self._docs}
+
+    class FakeAuthorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    first_docs = [
+        {
+            "key": "/works/OLA",
+            "title": "Book Alpha",
+            "first_publish_year": 2020,
+            "subject": ["Fiction"],
+            "language": ["eng"],
+            "author_key": ["OL888A"],
+        },
+        {
+            "key": "/works/OLB",
+            "title": "Book Beta",
+            "first_publish_year": 2021,
+            "subject": ["Fiction"],
+            "language": ["eng"],
+            "author_key": ["OL888A"],
+        },
+    ]
+    second_docs = first_docs[:1]  # Book Beta disappears on re-poll
+
+    def fake_get(url, params=None, timeout=None):
+        if url == "https://openlibrary.org/search.json":
+            state["call"] += 1
+            return FakeSearchResponse(first_docs if state["call"] == 1 else second_docs)
+        return FakeAuthorResponse()
+
+    monkeypatch.setattr(webapp.requests, "get", fake_get)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        client = TestClient(create_app(str(config)))
+
+        first = client.post("/api/authors/Stale%20Author/poll-bibliography").json()
+        assert {r["title"] for r in first["bibliography"]} == {"Book Alpha", "Book Beta"}
+
+        second = client.post("/api/authors/Stale%20Author/poll-bibliography").json()
+        titles = {r["title"] for r in second["bibliography"]}
+        assert titles == {"Book Alpha"}
+        assert "Book Beta" not in titles

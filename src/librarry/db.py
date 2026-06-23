@@ -469,6 +469,9 @@ class Database:
     def replace_author_bibliography(self, author: str, rows: list[dict]) -> list[dict]:
         now = utcnow()
         with self.connect() as conn:
+            # True replace: drop the author's prior rows so a re-poll removes
+            # entries that have since been filtered out (e.g. foreign-only works).
+            conn.execute("DELETE FROM author_bibliography WHERE author=?", (author,))
             for row in rows:
                 conn.execute(
                     """

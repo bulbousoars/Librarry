@@ -706,14 +706,17 @@ def create_app(config_path: str) -> FastAPI:
         return _db().list_authors()
 
     @app.post("/api/authors/{author:path}/poll-bibliography")
-    def api_poll_author_bibliography(author: str) -> dict[str, Any]:
+    def api_poll_author_bibliography(author: str, languages: str = "eng") -> dict[str, Any]:
+        # languages="eng" (default) keeps only English-representable works; pass
+        # ?languages=all to keep every language.
+        english_only = str(languages or "eng").strip().lower() != "all"
         try:
             resp = requests.get(
                 "https://openlibrary.org/search.json",
                 params={
                     "author": author,
                     "limit": 100,
-                    "fields": "key,title,series,first_publish_year,subject,author_key",
+                    "fields": "key,title,series,first_publish_year,subject,author_key,language",
                 },
                 timeout=20,
             )
@@ -732,6 +735,15 @@ def create_app(config_path: str) -> FastAPI:
             title = str(d.get("title") or "").strip()
             if not title or title.lower() in seen:
                 continue
+            # Language filter: a work's `language` lists every edition's MARC code.
+            # Keep it if any edition is English, or if OpenLibrary has no language
+            # data (don't hide real books). Drop foreign-only works — this covers
+            # both pure non-English titles and translation-only editions whose
+            # English originals appear under their own (English) work.
+            if english_only:
+                langs = [str(code).lower() for code in (d.get("language") or [])]
+                if langs and "eng" not in langs:
+                    continue
             seen.add(title.lower())
             if not author_key and d.get("author_key"):
                 author_key = str((d.get("author_key") or [""])[0])
