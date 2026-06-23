@@ -14,10 +14,20 @@ log = logging.getLogger(__name__)
 KINDLE_MAX_BYTES = 49 * 1024 * 1024  # Amazon ~50MB limit
 
 
-def send_to_kindle(cfg: AppConfig, book_path: Path, *, title: str, author: str) -> None:
-    if not cfg.send_kindle:
+def send_to_kindle(
+    cfg: AppConfig,
+    book_path: Path,
+    *,
+    title: str,
+    author: str,
+    kindle_to: str | None = None,
+    send_kindle: bool | None = None,
+) -> None:
+    enabled = cfg.send_kindle if send_kindle is None else send_kindle
+    recipient = cfg.kindle_to if kindle_to is None else kindle_to
+    if not enabled:
         return
-    if not cfg.kindle_to or not cfg.kindle_smtp_user or not cfg.kindle_smtp_password:
+    if not recipient or not cfg.kindle_smtp_user or not cfg.kindle_smtp_password:
         log.warning("Kindle send enabled but SMTP credentials incomplete; skipping")
         return
 
@@ -31,9 +41,9 @@ def send_to_kindle(cfg: AppConfig, book_path: Path, *, title: str, author: str) 
         return
 
     msg = EmailMessage()
-    msg["Subject"] = f"{title} — {author}"
+    msg["Subject"] = f"{title} - {author}"
     msg["From"] = cfg.kindle_from or cfg.kindle_smtp_user
-    msg["To"] = cfg.kindle_to
+    msg["To"] = recipient
     msg.set_content(f"Librarry imported: {title} by {author}")
 
     mime, _ = mimetypes.guess_type(book_path.name)
@@ -56,4 +66,4 @@ def send_to_kindle(cfg: AppConfig, book_path: Path, *, title: str, author: str) 
             smtp.login(cfg.kindle_smtp_user, cfg.kindle_smtp_password)
             smtp.send_message(msg)
 
-    log.info("Sent %r to Kindle (%s)", title, cfg.kindle_to)
+    log.info("Sent %r to Kindle (%s)", title, recipient)

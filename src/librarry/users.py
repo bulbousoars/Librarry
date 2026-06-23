@@ -297,7 +297,20 @@ class UserStore:
                 conn.execute(
                     "UPDATE users SET setup_complete=?, updated_at=? WHERE id=?",
                     (1 if setup_complete else 0, utcnow(), user_id),
-                )
+            )
+        return self.get_kindle_settings(user_id)
+
+    def set_kindle_test_status(self, user_id: str, status: str) -> KindleSettings:
+        with self.connect() as conn:
+            self._ensure_kindle_settings(conn, user_id)
+            conn.execute(
+                """
+                UPDATE user_kindle_settings
+                SET last_test_status=?, last_test_at=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (status[:500], utcnow(), utcnow(), user_id),
+            )
         return self.get_kindle_settings(user_id)
 
 

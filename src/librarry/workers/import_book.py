@@ -109,7 +109,7 @@ def scan_library(cfg: AppConfig, db: Database, *, title_threshold: float = 0.85)
     return {"matched": matched, "backfilled": backfilled, "library_files": len(index)}
 
 
-def import_ready(cfg: AppConfig, db: Database) -> dict[str, int]:
+def import_ready(cfg: AppConfig, db: Database, *, kindle_settings=None) -> dict[str, int]:
     imported = skipped = failed = 0
     for book in db.list_by_status("snatched"):
         if cfg.max_imports_per_run and imported >= cfg.max_imports_per_run:
@@ -152,7 +152,17 @@ def import_ready(cfg: AppConfig, db: Database) -> dict[str, int]:
             db.mark_imported(book.id, str(dest_file), ext)
             log.info("Imported %r -> %s", book.title, dest_file)
             try:
-                send_to_kindle(cfg, dest_file, title=book.title, author=book.author)
+                if kindle_settings is not None:
+                    send_to_kindle(
+                        cfg,
+                        dest_file,
+                        title=book.title,
+                        author=book.author,
+                        kindle_to=kindle_settings.kindle_to,
+                        send_kindle=kindle_settings.send_kindle,
+                    )
+                else:
+                    send_to_kindle(cfg, dest_file, title=book.title, author=book.author)
             except Exception as exc:
                 log.error("Kindle send failed for %r: %s", book.title, exc)
             imported += 1

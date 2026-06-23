@@ -396,6 +396,161 @@ torznab_indexers: []
         assert [b["title"] for b in client.get("/api/books").json()] == ["Reader Book"]
 
 
+def test_user_and_admin_can_manage_per_user_kindle_settings():
+    import librarry.webui.app as webapp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+kindle:
+  smtp_server: smtp.gmail.com
+  smtp_port: 465
+  use_ssl: true
+  from: secret:kindle_smtp_from
+  user: secret:kindle_smtp_user
+  password: secret:kindle_smtp_password
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        admin = app.state.users.upsert_local_admin("admin", "pw")
+        reader = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="reader",
+            email="login@example.com",
+            display_name="Reader",
+        )
+
+        client = TestClient(app)
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": reader.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        settings = client.get("/api/kindle/settings").json()
+        assert settings["kindle_to"] == ""
+        assert settings["send_kindle"] is False
+
+        updated = client.post(
+            "/api/kindle/settings",
+            json={"kindle_to": "reader@kindle.com", "send_kindle": True, "setup_complete": True},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["kindle_to"] == "reader@kindle.com"
+        assert updated.json()["send_kindle"] is True
+
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": admin.id, "auth_type": "local"}, "test-session-secret"),
+        )
+        admin_update = client.post(
+            f"/api/admin/users/{reader.id}/kindle",
+            json={"kindle_to": "admin-set@kindle.com", "send_kindle": False},
+        )
+        assert admin_update.status_code == 200
+        assert admin_update.json()["kindle_to"] == "admin-set@kindle.com"
+        assert admin_update.json()["send_kindle"] is False
+
+
+def test_user_can_send_kindle_test_document_with_per_user_recipient(monkeypatch):
+    import librarry.webui.app as webapp
+
+    sent = {}
+
+    def fake_send(cfg, path, *, title, author, kindle_to=None, send_kindle=None):
+        sent.update(
+            {
+                "path": path,
+                "title": title,
+                "author": author,
+                "kindle_to": kindle_to,
+                "send_kindle": send_kindle,
+                "smtp_user": cfg.kindle_smtp_user,
+            }
+        )
+
+    monkeypatch.setattr(webapp, "send_to_kindle", fake_send)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+kindle:
+  smtp_server: smtp.example.com
+  smtp_port: 465
+  use_ssl: true
+  from: sender@example.com
+  user: smtp-user
+  password: smtp-pass
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        reader = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="reader",
+            email="login@example.com",
+            display_name="Reader",
+        )
+        app.state.users.set_kindle_settings(
+            reader.id,
+            kindle_to="reader@kindle.com",
+            send_kindle=True,
+        )
+
+        client = TestClient(app)
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": reader.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        result = client.post("/api/kindle/test")
+        assert result.status_code == 200
+        assert result.json()["last_test_status"] == "sent"
+        assert sent["kindle_to"] == "reader@kindle.com"
+        assert sent["send_kindle"] is True
+        assert sent["smtp_user"] == "smtp-user"
+
+
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"
     config = root / "config.yaml"

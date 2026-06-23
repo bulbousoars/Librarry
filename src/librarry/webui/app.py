@@ -22,6 +22,7 @@ from librarry.auth import OIDCClient, OIDCError
 from librarry.hardcover import HardcoverRateLimited
 from librarry.config import AppConfig, load_config
 from librarry.db import Database
+from librarry.kindle import send_to_kindle
 from librarry.users import User, UserStore
 from librarry.workers.check import run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
@@ -43,6 +44,7 @@ _ACTIONS = {
 
 _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_user", default=None)
 _current_db: contextvars.ContextVar[Database | None] = contextvars.ContextVar("librarry_db", default=None)
+_effective_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_effective_user", default=None)
 
 SESSION_COOKIE = "librarry_session"
 OIDC_LOGIN_COOKIE = "librarry_oidc_login"
@@ -159,6 +161,19 @@ def _user_json(user: User) -> dict[str, Any]:
     }
 
 
+def _kindle_json(settings) -> dict[str, Any]:
+    return {
+        "user_id": settings.user_id,
+        "kindle_to": settings.kindle_to,
+        "send_kindle": settings.send_kindle,
+        "setup_complete": settings.setup_complete,
+        "last_test_status": settings.last_test_status,
+        "last_test_at": settings.last_test_at,
+        "last_send_status": settings.last_send_status,
+        "last_send_at": settings.last_send_at,
+    }
+
+
 def create_app(config_path: str) -> FastAPI:
     cfg = load_config(config_path)
     db = Database(cfg.database)
@@ -188,6 +203,9 @@ def create_app(config_path: str) -> FastAPI:
     def _db() -> Database:
         return _current_db.get() or app.state.db
 
+    def _effective() -> User | None:
+        return _effective_user.get() or _current()
+
     def _require_user() -> User:
         user = _current()
         if not user:
@@ -204,6 +222,7 @@ def create_app(config_path: str) -> FastAPI:
     async def _auth_middleware(request: Request, call_next):
         user_token = None
         db_token = None
+        effective_token = None
         user: User | None = None
         if _auth_enabled():
             raw = request.cookies.get(SESSION_COOKIE)
@@ -222,6 +241,7 @@ def create_app(config_path: str) -> FastAPI:
                             if selected and selected.enabled:
                                 effective = selected
                         db_token = _current_db.set(Database(effective.database_path))
+                        effective_token = _effective_user.set(effective)
             public = (
                 request.url.path == "/"
                 or request.url.path.startswith("/auth/")
@@ -234,6 +254,8 @@ def create_app(config_path: str) -> FastAPI:
         finally:
             if db_token is not None:
                 _current_db.reset(db_token)
+            if effective_token is not None:
+                _effective_user.reset(effective_token)
             if user_token is not None:
                 _current_user.reset(user_token)
 
@@ -516,6 +538,19 @@ def create_app(config_path: str) -> FastAPI:
         user = app.state.users.set_user_enabled(user_id, bool(payload.get("enabled")))
         return {"user": _user_json(user)}
 
+    @app.post("/api/admin/users/{user_id}/kindle")
+    def api_admin_user_kindle(user_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        _require_admin()
+        if not app.state.users.get_user(user_id):
+            raise HTTPException(404, "user not found")
+        settings = app.state.users.set_kindle_settings(
+            user_id,
+            kindle_to=str(payload["kindle_to"]).strip() if "kindle_to" in payload else None,
+            send_kindle=bool(payload["send_kindle"]) if "send_kindle" in payload else None,
+            setup_complete=bool(payload["setup_complete"]) if "setup_complete" in payload else None,
+        )
+        return _kindle_json(settings)
+
     @app.post("/api/admin/effective-user")
     def api_admin_effective_user(payload: dict[str, Any] = Body(...)) -> JSONResponse:
         admin = _require_admin()
@@ -535,6 +570,48 @@ def create_app(config_path: str) -> FastAPI:
             secure=False,
         )
         return response
+
+    @app.get("/api/kindle/settings")
+    def api_kindle_settings() -> dict[str, Any]:
+        user = _require_user()
+        return _kindle_json(app.state.users.get_kindle_settings(user.id))
+
+    @app.post("/api/kindle/settings")
+    def api_save_kindle_settings(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        user = _require_user()
+        settings = app.state.users.set_kindle_settings(
+            user.id,
+            kindle_to=str(payload["kindle_to"]).strip() if "kindle_to" in payload else None,
+            send_kindle=bool(payload["send_kindle"]) if "send_kindle" in payload else None,
+            setup_complete=bool(payload["setup_complete"]) if "setup_complete" in payload else None,
+        )
+        return _kindle_json(settings)
+
+    @app.post("/api/kindle/test")
+    def api_kindle_test() -> dict[str, Any]:
+        user = _require_user()
+        settings = app.state.users.get_kindle_settings(user.id)
+        if not settings.send_kindle:
+            raise HTTPException(400, "Send to Kindle is disabled for this user")
+        if not settings.kindle_to:
+            raise HTTPException(400, "Kindle email is not configured for this user")
+        test_dir = app.state.cfg.state_dir / "kindle-tests"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        test_file = test_dir / f"{user.id}.txt"
+        test_file.write_text("This is a Librarry Send to Kindle test document.\n", encoding="utf-8")
+        try:
+            send_to_kindle(
+                app.state.cfg,
+                test_file,
+                title="Librarry Test Document",
+                author="Librarry",
+                kindle_to=settings.kindle_to,
+                send_kindle=settings.send_kindle,
+            )
+        except Exception as exc:
+            updated = app.state.users.set_kindle_test_status(user.id, f"failed: {exc}")
+            raise HTTPException(500, _kindle_json(updated)) from exc
+        return _kindle_json(app.state.users.set_kindle_test_status(user.id, "sent"))
 
     # ----- core data -----
 
@@ -969,9 +1046,20 @@ def create_app(config_path: str) -> FastAPI:
     @app.post("/api/actions/{name}")
     def api_action(name: str, background: BackgroundTasks) -> JSONResponse:
         if name == "run":
-            background.add_task(_run_pipeline, config_path)
-            app.state.last_action = {"action": "run", "started": True, "at": _now()}
-            return JSONResponse({"started": True, "action": "run"})
+            cfg = _reload_cfg()
+            db = _db()
+            effective = _effective()
+            kindle_settings = app.state.users.get_kindle_settings(effective.id) if effective else None
+            result = {
+                "sync": sync_hardcover(cfg, db),
+                "scan": scan_library(cfg, db),
+                "search": search_wanted(cfg, db),
+                "poll": poll_downloads(cfg, db),
+                "libgen": fetch_libgen(cfg, db),
+                "import": import_ready(cfg, db, kindle_settings=kindle_settings),
+            }
+            app.state.last_action = {"action": "run", "result": result, "at": _now()}
+            return JSONResponse({"action": "run", "result": result})
         if name == "retry":
             n = _db().retry_failed()
             app.state.last_action = {"action": "retry", "reset": n, "at": _now()}
@@ -980,7 +1068,12 @@ def create_app(config_path: str) -> FastAPI:
         if not fn:
             raise HTTPException(404, f"Unknown action: {name}")
         cfg = _reload_cfg()
-        result = fn(cfg, _db())
+        if name == "import":
+            effective = _effective()
+            kindle_settings = app.state.users.get_kindle_settings(effective.id) if effective else None
+            result = import_ready(cfg, _db(), kindle_settings=kindle_settings)
+        else:
+            result = fn(cfg, _db())
         app.state.last_action = {"action": name, "result": result, "at": _now()}
         return JSONResponse({"action": name, "result": result})
 
