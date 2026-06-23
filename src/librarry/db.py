@@ -120,6 +120,7 @@ _AUTHOR_PROFILE_EXTRA_COLUMNS: list[tuple[str, str]] = [
 
 _AUTHOR_BIBLIOGRAPHY_EXTRA_COLUMNS: list[tuple[str, str]] = [
     ("series", "TEXT"),
+    ("date_added", "TEXT"),
 ]
 
 
@@ -205,6 +206,11 @@ class Database:
             for col, coltype in _AUTHOR_BIBLIOGRAPHY_EXTRA_COLUMNS:
                 if col not in existing_bib:
                     conn.execute(f"ALTER TABLE author_bibliography ADD COLUMN {col} {coltype}")
+            # Backfill date_added for rows that predate the column (best-effort:
+            # use their last-updated timestamp as the first-seen date).
+            conn.execute(
+                "UPDATE author_bibliography SET date_added=updated_at WHERE date_added IS NULL"
+            )
 
     def upsert_wanted(
         self,
@@ -474,16 +480,26 @@ class Database:
     def replace_author_bibliography(self, author: str, rows: list[dict]) -> list[dict]:
         now = utcnow()
         with self.connect() as conn:
+            # Preserve each entry's first-seen date across the delete-then-insert
+            # below, keyed the same way as the UNIQUE(author, title, source).
+            prior_added = {
+                (r["title"], r["source"] or ""): r["date_added"]
+                for r in conn.execute(
+                    "SELECT title, source, date_added FROM author_bibliography WHERE author=?",
+                    (author,),
+                )
+            }
             # True replace: drop the author's prior rows so a re-poll removes
             # entries that have since been filtered out (e.g. foreign-only works).
             conn.execute("DELETE FROM author_bibliography WHERE author=?", (author,))
             for row in rows:
+                date_added = prior_added.get((row.get("title", ""), row.get("source", "") or "")) or now
                 conn.execute(
                     """
                     INSERT INTO author_bibliography (
                         author, title, series, release_date, release_year, category, genre,
-                        source, source_id, source_url, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source, source_id, source_url, date_added, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(author, title, source) DO UPDATE SET
                         series=excluded.series,
                         release_date=excluded.release_date,
@@ -505,6 +521,7 @@ class Database:
                         row.get("source", ""),
                         row.get("source_id", ""),
                         row.get("source_url", ""),
+                        date_added,
                         now,
                     ),
                 )

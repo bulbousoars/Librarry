@@ -2108,6 +2108,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <td>${esc(row.release_date || row.release_year || '')}</td>
           <td>${esc(row.category||'')}</td>
           <td>${esc(row.genre||'')}</td>
+          <td>${esc((row.date_added||'').slice(0,10))}</td>
           <td style="text-align:right">${row.library_status
             ? `<span class="status status-${row.library_status==='Owned'?'imported':row.library_status==='In Progress'?'snatched':row.library_status.toLowerCase()}">${esc(row.library_status)}</span>`
             : `<button class="btn-sm" onclick="VIEWS.addBibliographyWanted('${encodeURIComponent(row.title||'')}')">Add to wanted</button>`}</td>
@@ -2159,8 +2160,8 @@ _PAGE_HTML = """<!DOCTYPE html>
                 <button class="primary" onclick="VIEWS.pollAuthorBibliography()">Poll Author Bibliography</button>
               </div>
               <div class="tablewrap"><table>
-                <thead><tr><th>Title</th><th>Series</th><th>Released</th><th>Category</th><th>Genre</th><th></th></tr></thead>
-                <tbody>${bibliography || '<tr><td colspan="6" class="muted">No bibliography rows yet. Poll this author to fetch them.</td></tr>'}</tbody>
+                <thead><tr><th>Title</th><th>Series</th><th>Released</th><th>Category</th><th>Genre</th><th>Added</th><th></th></tr></thead>
+                <tbody>${bibliography || '<tr><td colspan="7" class="muted">No bibliography rows yet. Poll this author to fetch them.</td></tr>'}</tbody>
               </table></div>
             </div>
           </div>

@@ -1321,6 +1321,39 @@ def test_author_bibliography_normalizes_cached_series_subjects():
         assert row["genre"] == ""
 
 
+def test_author_bibliography_date_added_persists_across_repoll():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        db = app.state.db
+
+        row = {"title": "Book One", "source": "openlibrary", "category": "Fiction", "genre": ""}
+        db.replace_author_bibliography("Date Author", [row])
+        first = db.list_author_bibliography("Date Author")[0]
+        assert first["date_added"]  # set on first insert
+
+        # Simulate an older first-seen date, then re-poll (delete-then-insert).
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE author_bibliography SET date_added=? WHERE author=? AND title=?",
+                ("2020-01-01T00:00:00+00:00", "Date Author", "Book One"),
+            )
+        db.replace_author_bibliography("Date Author", [row])
+        again = db.list_author_bibliography("Date Author")[0]
+        assert again["date_added"] == "2020-01-01T00:00:00+00:00"  # preserved
+        assert again["updated_at"] != "2020-01-01T00:00:00+00:00"  # refreshed
+
+        # A genuinely new row added on a later poll gets its own date_added.
+        db.replace_author_bibliography(
+            "Date Author",
+            [row, {"title": "Book Two", "source": "openlibrary", "category": "Fiction", "genre": ""}],
+        )
+        rows = {r["title"]: r for r in db.list_author_bibliography("Date Author")}
+        assert rows["Book One"]["date_added"] == "2020-01-01T00:00:00+00:00"
+        assert rows["Book Two"]["date_added"] and rows["Book Two"]["date_added"] != "2020-01-01T00:00:00+00:00"
+
+
 def test_hardcover_search_handles_network_error(monkeypatch):
     import librarry.webui.app as webapp
 
