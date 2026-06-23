@@ -130,8 +130,8 @@ class AppConfig:
     webui_enabled: bool
     webui_host: str
     webui_port: int
-    auth: AuthConfig
-    raw: dict[str, Any]
+    auth: AuthConfig = field(default_factory=AuthConfig)
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_indexers(
