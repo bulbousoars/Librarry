@@ -94,3 +94,39 @@ def request(cfg, query: str, variables: dict | None = None, *, block: bool = Tru
     )
     resp.raise_for_status()
     return resp.json()
+
+
+_AUTHOR_QUERY = (
+    "query($name:String!){ authors(where:{name:{_ilike:$name}}, limit:5)"
+    "{ name slug books_count } }"
+)
+
+
+def find_author_profile_url(cfg, name: str, *, block: bool = False, timeout: int = 20) -> str:
+    """Return the author's Hardcover profile URL, or "" if it can't be found.
+
+    Only a case-insensitive *exact* name match is surfaced — a near-but-wrong
+    match is never guessed (so we don't repeat the wrong-author-link problem).
+    Returns "" when the token is unset, the request is throttled/fails, or no
+    confident match exists. On multiple exact matches, the most prolific author
+    (highest books_count) wins.
+    """
+    name = (name or "").strip()
+    if not name or not getattr(cfg, "hardcover_token", ""):
+        return ""
+    try:
+        body = request(cfg, _AUTHOR_QUERY, {"name": name}, block=block, timeout=timeout)
+    except Exception:
+        return ""
+    if not isinstance(body, dict) or body.get("errors"):
+        return ""
+    authors = ((body.get("data") or {}).get("authors")) or []
+    target = name.lower()
+    matches = [
+        a for a in authors
+        if str(a.get("name") or "").strip().lower() == target and a.get("slug")
+    ]
+    if not matches:
+        return ""
+    best = max(matches, key=lambda a: a.get("books_count") or 0)
+    return f"https://hardcover.app/authors/{best['slug']}"

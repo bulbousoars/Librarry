@@ -1636,3 +1636,105 @@ def test_poll_bibliography_replace_removes_stale_rows(monkeypatch):
         titles = {r["title"] for r in second["bibliography"]}
         assert titles == {"Book Alpha"}
         assert "Book Beta" not in titles
+
+
+def _single_english_doc(title="Between Two Fires", author_key="OL999A"):
+    return [
+        {
+            "key": "/works/OLX",
+            "title": title,
+            "first_publish_year": 2012,
+            "subject": ["Fiction", "Horror"],
+            "language": ["eng"],
+            "author_key": [author_key],
+        }
+    ]
+
+
+def test_poll_bibliography_sets_hardcover_author_url(monkeypatch):
+    import librarry.webui.app as webapp
+
+    class FakeSearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"docs": _single_english_doc()}
+
+    class FakeAuthorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def fake_get(url, params=None, timeout=None):
+        if url == "https://openlibrary.org/search.json":
+            return FakeSearchResponse()
+        return FakeAuthorResponse()
+
+    def fake_hc_request(cfg, query, variables=None, *, block=True, timeout=30):
+        assert variables == {"name": "Christopher Buehlman"}
+        return {
+            "data": {
+                "authors": [
+                    {"name": "Christopher Buehlman", "slug": "christopher-buehlman", "books_count": 12}
+                ]
+            }
+        }
+
+    monkeypatch.setattr(webapp.requests, "get", fake_get)
+    monkeypatch.setattr(webapp.hardcover, "request", fake_hc_request)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        app.state.cfg.hardcover_token = "test-token"
+        client = TestClient(app)
+
+        client.post("/api/authors/Christopher%20Buehlman/poll-bibliography")
+        detail = client.get("/api/authors/Christopher%20Buehlman").json()
+        assert detail["hardcover_url"] == "https://hardcover.app/authors/christopher-buehlman"
+
+
+def test_poll_bibliography_hardcover_lookup_failure_is_non_fatal(monkeypatch):
+    import librarry.webui.app as webapp
+
+    class FakeSearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"docs": _single_english_doc()}
+
+    class FakeAuthorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def fake_get(url, params=None, timeout=None):
+        if url == "https://openlibrary.org/search.json":
+            return FakeSearchResponse()
+        return FakeAuthorResponse()
+
+    def boom(*a, **k):
+        raise RuntimeError("hardcover down")
+
+    monkeypatch.setattr(webapp.requests, "get", fake_get)
+    monkeypatch.setattr(webapp.hardcover, "request", boom)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        app.state.cfg.hardcover_token = "test-token"
+        client = TestClient(app)
+
+        polled = client.post("/api/authors/Christopher%20Buehlman/poll-bibliography")
+        assert polled.status_code == 200
+        assert polled.json()["bibliography"][0]["title"] == "Between Two Fires"
+        detail = client.get("/api/authors/Christopher%20Buehlman").json()
+        assert detail["hardcover_url"] == ""

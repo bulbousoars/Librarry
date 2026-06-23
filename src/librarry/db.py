@@ -115,6 +115,7 @@ _AUTHOR_PROFILE_EXTRA_COLUMNS: list[tuple[str, str]] = [
     ("nationality", "TEXT"),
     ("hometown", "TEXT"),
     ("source_url", "TEXT"),
+    ("hardcover_url", "TEXT"),
 ]
 
 _AUTHOR_BIBLIOGRAPHY_EXTRA_COLUMNS: list[tuple[str, str]] = [
@@ -355,6 +356,7 @@ class Database:
             "nationality": "",
             "hometown": "",
             "source_url": "",
+            "hardcover_url": "",
             "updated_at": None,
         }
 
@@ -370,6 +372,7 @@ class Database:
         nationality: str = "",
         hometown: str = "",
         source_url: str = "",
+        hardcover_url: str = "",
     ) -> dict:
         now = utcnow()
         with self.connect() as conn:
@@ -377,9 +380,9 @@ class Database:
                 """
                 INSERT INTO author_profiles (
                     author, profile, notes, tags, image_url, total_books_written,
-                    nationality, hometown, source_url, updated_at
+                    nationality, hometown, source_url, hardcover_url, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(author) DO UPDATE SET
                     profile=excluded.profile,
                     notes=excluded.notes,
@@ -389,6 +392,7 @@ class Database:
                     nationality=excluded.nationality,
                     hometown=excluded.hometown,
                     source_url=excluded.source_url,
+                    hardcover_url=excluded.hardcover_url,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -401,6 +405,7 @@ class Database:
                     nationality,
                     hometown,
                     source_url,
+                    hardcover_url,
                     now,
                 ),
             )

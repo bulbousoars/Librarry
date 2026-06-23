@@ -765,7 +765,12 @@ def create_app(config_path: str) -> FastAPI:
         bibliography = _db().replace_author_bibliography(author, rows)
         profile = _db().get_author_profile(author)
         metadata = _openlibrary_author_metadata(author_key, len(bibliography))
-        if bibliography or metadata:
+        # Best-effort Hardcover author profile link; only set on a confident
+        # match, otherwise keep whatever was stored before (never guess).
+        hardcover_url = hardcover.find_author_profile_url(app.state.cfg, author) or profile.get(
+            "hardcover_url", ""
+        )
+        if bibliography or metadata or hardcover_url:
             _db().set_author_profile(
                 author,
                 profile=metadata.get("profile") or profile.get("profile", ""),
@@ -776,6 +781,7 @@ def create_app(config_path: str) -> FastAPI:
                 nationality=metadata.get("nationality") or profile.get("nationality", ""),
                 hometown=metadata.get("hometown") or profile.get("hometown", ""),
                 source_url=metadata.get("source_url") or profile.get("source_url", ""),
+                hardcover_url=hardcover_url,
             )
         return {"author": author, "bibliography": _bibliography_json(author, bibliography)}
 
@@ -816,6 +822,7 @@ def create_app(config_path: str) -> FastAPI:
             nationality=current.get("nationality", ""),
             hometown=current.get("hometown", ""),
             source_url=current.get("source_url", ""),
+            hardcover_url=current.get("hardcover_url", ""),
         )
         books = [_book_json(b) for b in _db().list_by_author(author)]
         bibliography = _bibliography_json(author, _db().list_author_bibliography(author))
@@ -2109,6 +2116,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         ['Total books written', a.total_books_written],
         ['Nationality', a.nationality],
         ['Hometown', a.hometown],
+        ['Hardcover', a.hardcover_url ? `<a href="${esc(a.hardcover_url)}" target="_blank" rel="noopener">View profile</a>` : ''],
       ].filter(([_, v]) => v !== null && v !== undefined && String(v).trim() !== '');
       const source = a.source_url ? `<div style="margin-top:0.75rem"><div class="muted">Source</div><div><a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url)}</a></div></div>` : '';
       const stats = [
