@@ -11,6 +11,7 @@ import uvicorn
 
 from librarry.config import load_config
 from librarry.db import Database
+from librarry.users import UserStore
 from librarry.vault import SecretsVault, VaultError
 from librarry.workers.check import REQUIRED_SECRETS, run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
@@ -141,6 +142,20 @@ def _print_check(result) -> int:
     return 0 if result.success else 1
 
 
+def _cmd_admin_bootstrap(config_path: str, username: str) -> int:
+    cfg = load_config(config_path)
+    p1 = getpass.getpass("Local admin password: ")
+    p2 = getpass.getpass("Confirm local admin password: ")
+    if p1 != p2:
+        print("Passwords do not match", file=sys.stderr)
+        return 1
+    store = UserStore(cfg.state_dir / "users.db", cfg.state_dir / "users")
+    store.init()
+    store.upsert_local_admin(username, p1)
+    print(f"Bootstrapped local admin: {username}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="librarry", description="Librarry ebook orchestrator")
     default_config = os.environ.get("LIBRARRY_CONFIG", "")
@@ -171,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_retry = sub.add_parser("retry", help="Reset failed books to wanted")
     p_retry.add_argument("--failed-only", action="store_true", default=True)
+
+    admin = sub.add_parser("admin", help="Manage local admin accounts")
+    admin_sub = admin.add_subparsers(dest="admin_cmd", required=True)
+    p_admin_boot = admin_sub.add_parser("bootstrap", help="Create or rotate a local break-glass admin")
+    p_admin_boot.add_argument("--username", default="admin")
 
     secrets = sub.add_parser("secrets", help="Manage encrypted credentials")
     secrets_sub = secrets.add_subparsers(dest="secrets_cmd", required=True)
@@ -209,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
         except VaultError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
+
+    if args.command == "admin":
+        if args.admin_cmd == "bootstrap":
+            return _cmd_admin_bootstrap(args.config, args.username)
+        print(f"Unknown admin command: {args.admin_cmd}", file=sys.stderr)
+        return 1
 
     cfg = load_config(args.config)
 

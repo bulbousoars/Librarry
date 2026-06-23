@@ -13,6 +13,19 @@ webui:
   host: 0.0.0.0
   port: 5300
 
+auth:
+  enabled: false
+  session_secret: secret:librarry_session_secret
+  local_admin:
+    enabled: true
+  oidc:
+    enabled: false
+    issuer: https://idp.example.com/realms/librarry
+    client_id: librarry
+    client_secret: secret:oidc_client_secret
+    redirect_uri: https://library.example.com/auth/oidc/callback
+    scopes: [openid, email, profile]
+
 # Encrypted credential store (created by: librarry secrets init)
 secrets:
   vault: /mnt/storage/docker/scripts/librarry/state/secrets.vault

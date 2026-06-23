@@ -117,6 +117,49 @@ def test_user_store_local_admin_password_hash_and_verify():
         assert verified.id == admin.id
 
 
+def test_cli_admin_bootstrap_creates_local_admin(monkeypatch, capsys):
+    from librarry.cli import main
+    from librarry.users import UserStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        answers = iter(["pw", "pw"])
+        monkeypatch.setattr("getpass.getpass", lambda prompt: next(answers))
+
+        assert main(["--config", str(config), "admin", "bootstrap", "--username", "admin"]) == 0
+
+        out = capsys.readouterr().out
+        assert "Bootstrapped local admin: admin" in out
+        store = UserStore(root / "state" / "users.db", root / "state" / "users")
+        store.init()
+        assert store.verify_local_admin("admin", "pw") is not None
+
+
 def test_webui_status_and_books():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
