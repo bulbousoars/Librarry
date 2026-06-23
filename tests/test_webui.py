@@ -7,6 +7,63 @@ from librarry.db import Database
 from librarry.webui.app import create_app
 
 
+def test_user_store_self_provisions_oidc_user_enabled_with_own_db_and_kindle_disabled():
+    from librarry.users import UserStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = UserStore(root / "state" / "users.db", root / "state" / "users")
+        store.init()
+
+        user = store.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="stable-sub-123",
+            email="login@example.com",
+            display_name="Reader One",
+            preferred_username="reader1",
+        )
+
+        assert user.enabled is True
+        assert user.is_admin is False
+        assert user.email == "login@example.com"
+        assert user.display_name == "Reader One"
+        assert user.database_path == root / "state" / "users" / user.id / "librarry.db"
+        assert user.database_path.exists()
+
+        kindle = store.get_kindle_settings(user.id)
+        assert kindle.send_kindle is False
+        assert kindle.kindle_to == ""
+        assert kindle.setup_complete is False
+
+        same = store.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="stable-sub-123",
+            email="changed@example.com",
+            display_name="Reader Renamed",
+            preferred_username="reader1",
+        )
+        assert same.id == user.id
+        assert same.database_path == user.database_path
+
+
+def test_user_store_local_admin_password_hash_and_verify():
+    from librarry.users import UserStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = UserStore(root / "state" / "users.db", root / "state" / "users")
+        store.init()
+
+        admin = store.upsert_local_admin("admin", "correct horse battery staple")
+
+        assert admin.enabled is True
+        assert admin.is_admin is True
+        assert store.verify_local_admin("admin", "wrong") is None
+        verified = store.verify_local_admin("admin", "correct horse battery staple")
+        assert verified is not None
+        assert verified.id == admin.id
+
+
 def test_webui_status_and_books():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
