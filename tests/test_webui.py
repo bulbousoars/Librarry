@@ -279,6 +279,123 @@ torznab_indexers: []
         assert kindle.send_kindle is False
 
 
+def test_webui_uses_authenticated_users_own_database():
+    import librarry.webui.app as webapp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        u1 = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="sub-1",
+            email="one@example.com",
+            display_name="One",
+        )
+        u2 = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="sub-2",
+            email="two@example.com",
+            display_name="Two",
+        )
+        Database(u1.database_path).add_manual("User One Book", "Author")
+        Database(u2.database_path).add_manual("User Two Book", "Author")
+
+        client = TestClient(app)
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": u1.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        assert [b["title"] for b in client.get("/api/books").json()] == ["User One Book"]
+
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": u2.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        assert [b["title"] for b in client.get("/api/books").json()] == ["User Two Book"]
+
+
+def test_admin_can_select_user_database_but_normal_user_cannot():
+    import librarry.webui.app as webapp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        admin = app.state.users.upsert_local_admin("admin", "pw")
+        reader = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="reader",
+            email="reader@example.com",
+            display_name="Reader",
+        )
+        Database(reader.database_path).add_manual("Reader Book", "Author")
+
+        client = TestClient(app)
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": reader.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        assert client.post("/api/admin/effective-user", json={"user_id": reader.id}).status_code == 403
+
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": admin.id, "auth_type": "local"}, "test-session-secret"),
+        )
+        assert client.get("/api/admin/users").status_code == 200
+        selected = client.post("/api/admin/effective-user", json={"user_id": reader.id})
+        assert selected.status_code == 200
+        assert [b["title"] for b in client.get("/api/books").json()] == ["Reader Book"]
+
+
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"
     config = root / "config.yaml"

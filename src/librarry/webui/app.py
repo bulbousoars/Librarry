@@ -42,6 +42,7 @@ _ACTIONS = {
 }
 
 _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_user", default=None)
+_current_db: contextvars.ContextVar[Database | None] = contextvars.ContextVar("librarry_db", default=None)
 
 SESSION_COOKIE = "librarry_session"
 OIDC_LOGIN_COOKIE = "librarry_oidc_login"
@@ -184,9 +185,25 @@ def create_app(config_path: str) -> FastAPI:
     def _current() -> User | None:
         return _current_user.get()
 
+    def _db() -> Database:
+        return _current_db.get() or app.state.db
+
+    def _require_user() -> User:
+        user = _current()
+        if not user:
+            raise HTTPException(401, "authentication required")
+        return user
+
+    def _require_admin() -> User:
+        user = _require_user()
+        if not user.is_admin:
+            raise HTTPException(403, "admin access required")
+        return user
+
     @app.middleware("http")
     async def _auth_middleware(request: Request, call_next):
-        token = None
+        user_token = None
+        db_token = None
         user: User | None = None
         if _auth_enabled():
             raw = request.cookies.get(SESSION_COOKIE)
@@ -197,7 +214,14 @@ def create_app(config_path: str) -> FastAPI:
                     found = app.state.users.get_user(user_id)
                     if found and found.enabled:
                         user = found
-                        token = _current_user.set(user)
+                        user_token = _current_user.set(user)
+                        effective = user
+                        effective_id = str((payload or {}).get("effective_user_id") or "")
+                        if user.is_admin and effective_id:
+                            selected = app.state.users.get_user(effective_id)
+                            if selected and selected.enabled:
+                                effective = selected
+                        db_token = _current_db.set(Database(effective.database_path))
             public = (
                 request.url.path == "/"
                 or request.url.path.startswith("/auth/")
@@ -208,8 +232,10 @@ def create_app(config_path: str) -> FastAPI:
         try:
             return await call_next(request)
         finally:
-            if token is not None:
-                _current_user.reset(token)
+            if db_token is not None:
+                _current_db.reset(db_token)
+            if user_token is not None:
+                _current_user.reset(user_token)
 
     def _reload_cfg() -> AppConfig:
         cfg = load_config(config_path)
@@ -269,7 +295,7 @@ def create_app(config_path: str) -> FastAPI:
 
     def _book_json(b) -> dict[str, Any]:
         data = asdict(b)
-        extras = app.state.db.get_book_extras(b.id)
+        extras = _db().get_book_extras(b.id)
         stage, detail = _book_progress(b)
         data["local_path"] = b.library_path or b.download_path
         data["hardcover_url"] = _hardcover_url(b)
@@ -375,7 +401,7 @@ def create_app(config_path: str) -> FastAPI:
                         remaining_genres.append(part)
                 d["series"] = ", ".join(series_parts[:2])
                 d["genre"] = ", ".join(remaining_genres)
-            book = app.state.db.get_by_author_title(author, d.get("title", ""))
+            book = _db().get_by_author_title(author, d.get("title", ""))
             d["library_status"] = labels.get(book.status, book.status.title()) if book else ""
             d["library_book_id"] = book.id if book else ""
             out.append(d)
@@ -477,13 +503,46 @@ def create_app(config_path: str) -> FastAPI:
         response.delete_cookie(OIDC_LOGIN_COOKIE)
         return response
 
+    # ----- admin users -----
+
+    @app.get("/api/admin/users")
+    def api_admin_users() -> dict[str, Any]:
+        _require_admin()
+        return {"users": [_user_json(u) for u in app.state.users.list_users()]}
+
+    @app.post("/api/admin/users/{user_id}/enabled")
+    def api_admin_user_enabled(user_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        _require_admin()
+        user = app.state.users.set_user_enabled(user_id, bool(payload.get("enabled")))
+        return {"user": _user_json(user)}
+
+    @app.post("/api/admin/effective-user")
+    def api_admin_effective_user(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+        admin = _require_admin()
+        user_id = str(payload.get("user_id") or "").strip()
+        selected = app.state.users.get_user(user_id)
+        if not selected or not selected.enabled:
+            raise HTTPException(404, "user not found")
+        response = JSONResponse({"selected_user": _user_json(selected)})
+        response.set_cookie(
+            SESSION_COOKIE,
+            _sign_session(
+                {"user_id": admin.id, "auth_type": admin.auth_type, "effective_user_id": selected.id},
+                _session_secret(),
+            ),
+            httponly=True,
+            samesite="lax",
+            secure=False,
+        )
+        return response
+
     # ----- core data -----
 
     @app.get("/api/status")
     def api_status() -> dict[str, Any]:
         cfg = app.state.cfg
         return {
-            "counts": app.state.db.counts(),
+            "counts": _db().counts(),
             "library_dir": str(cfg.library_dir),
             "download_dir": str(cfg.download_dir),
             "version": __version__,
@@ -494,7 +553,7 @@ def create_app(config_path: str) -> FastAPI:
         status: str | None = Query(default=None),
         limit: int = Query(default=100, le=500),
     ) -> list[dict[str, Any]]:
-        db = app.state.db
+        db = _db()
         if status:
             books = db.list_by_status(status)[:limit]
         else:
@@ -507,32 +566,32 @@ def create_app(config_path: str) -> FastAPI:
         author = str(payload.get("author", "")).strip()
         if not title:
             raise HTTPException(400, "title is required")
-        book_id = app.state.db.add_manual(title, author)
+        book_id = _db().add_manual(title, author)
         return {"added": True, "id": book_id, "title": title, "author": author or "Unknown"}
 
     @app.get("/api/books/{book_id:path}")
     def api_book_detail(book_id: str) -> dict[str, Any]:
-        book = app.state.db.get(book_id)
+        book = _db().get(book_id)
         if not book:
             raise HTTPException(404, "book not found")
         return _book_json(book)
 
     @app.post("/api/books/{book_id:path}/extras")
     def api_book_extras(book_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        book = app.state.db.get(book_id)
+        book = _db().get(book_id)
         if not book:
             raise HTTPException(404, "book not found")
-        app.state.db.set_book_extras(
+        _db().set_book_extras(
             book_id,
             notes=str(payload.get("notes", ""))[:10000],
             tags=str(payload.get("tags", ""))[:1000],
             cover_override_url=str(payload.get("cover_override_url", ""))[:2000],
         )
-        return _book_json(app.state.db.get(book_id))
+        return _book_json(_db().get(book_id))
 
     @app.get("/api/authors")
     def api_authors() -> list[dict[str, Any]]:
-        return app.state.db.list_authors()
+        return _db().list_authors()
 
     @app.post("/api/authors/{author:path}/poll-bibliography")
     def api_poll_author_bibliography(author: str) -> dict[str, Any]:
@@ -551,7 +610,7 @@ def create_app(config_path: str) -> FastAPI:
         except Exception as exc:
             return {
                 "author": author,
-                "bibliography": _bibliography_json(author, app.state.db.list_author_bibliography(author)),
+                "bibliography": _bibliography_json(author, _db().list_author_bibliography(author)),
                 "error": str(exc),
             }
         rows = []
@@ -579,11 +638,11 @@ def create_app(config_path: str) -> FastAPI:
                     "source_url": f"https://openlibrary.org{d.get('key')}" if d.get("key") else "",
                 }
             )
-        bibliography = app.state.db.replace_author_bibliography(author, rows)
-        profile = app.state.db.get_author_profile(author)
+        bibliography = _db().replace_author_bibliography(author, rows)
+        profile = _db().get_author_profile(author)
         metadata = _openlibrary_author_metadata(author_key, len(bibliography))
         if bibliography or metadata:
-            app.state.db.set_author_profile(
+            _db().set_author_profile(
                 author,
                 profile=metadata.get("profile") or profile.get("profile", ""),
                 notes=profile.get("notes", ""),
@@ -601,8 +660,8 @@ def create_app(config_path: str) -> FastAPI:
         title = str(payload.get("title", "")).strip()
         if not title:
             raise HTTPException(400, "title is required")
-        row = app.state.db.get_author_bibliography_item(author, title)
-        book_id = app.state.db.add_manual(title, author)
+        row = _db().get_author_bibliography_item(author, title)
+        book_id = _db().add_manual(title, author)
         meta = {}
         if row:
             meta = {
@@ -610,20 +669,20 @@ def create_app(config_path: str) -> FastAPI:
                 "release_date": row.get("release_date"),
                 "genres": row.get("genre"),
             }
-            app.state.db.set_metadata(book_id, {k: v for k, v in meta.items() if v})
+            _db().set_metadata(book_id, {k: v for k, v in meta.items() if v})
         return {"added": True, "id": book_id, "title": title, "author": author, "meta": meta}
 
     @app.get("/api/authors/{author:path}")
     def api_author_detail(author: str) -> dict[str, Any]:
-        profile = app.state.db.get_author_profile(author)
-        books = [_book_json(b) for b in app.state.db.list_by_author(author)]
-        bibliography = _bibliography_json(author, app.state.db.list_author_bibliography(author))
+        profile = _db().get_author_profile(author)
+        books = [_book_json(b) for b in _db().list_by_author(author)]
+        bibliography = _bibliography_json(author, _db().list_author_bibliography(author))
         return {**profile, "books": books, "bibliography": bibliography}
 
     @app.post("/api/authors/{author:path}")
     def api_author_profile(author: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        current = app.state.db.get_author_profile(author)
-        profile = app.state.db.set_author_profile(
+        current = _db().get_author_profile(author)
+        profile = _db().set_author_profile(
             author,
             profile=current.get("profile", ""),
             notes=str(payload.get("notes", ""))[:10000],
@@ -634,8 +693,8 @@ def create_app(config_path: str) -> FastAPI:
             hometown=current.get("hometown", ""),
             source_url=current.get("source_url", ""),
         )
-        books = [_book_json(b) for b in app.state.db.list_by_author(author)]
-        bibliography = _bibliography_json(author, app.state.db.list_author_bibliography(author))
+        books = [_book_json(b) for b in _db().list_by_author(author)]
+        bibliography = _bibliography_json(author, _db().list_author_bibliography(author))
         return {**profile, "books": books, "bibliography": bibliography}
 
     def _delete_library_file(book) -> bool:
@@ -663,20 +722,20 @@ def create_app(config_path: str) -> FastAPI:
     @app.post("/api/books/{book_id:path}/delete_file")
     def api_delete_file(book_id: str) -> dict[str, Any]:
         """Delete the file from disk but keep the request: book returns to 'wanted'."""
-        book = app.state.db.get(book_id)
+        book = _db().get(book_id)
         if not book:
             raise HTTPException(404, "book not found")
         file_deleted = _delete_library_file(book)
-        app.state.db.clear_file(book_id)
+        _db().clear_file(book_id)
         return {"reset": True, "file_deleted": file_deleted}
 
     @app.delete("/api/books/{book_id:path}")
     def api_delete_book(book_id: str, delete_file: bool = Query(default=False)) -> dict[str, Any]:
-        book = app.state.db.get(book_id)
+        book = _db().get(book_id)
         file_deleted = False
         if delete_file and book:
             file_deleted = _delete_library_file(book)
-        n = app.state.db.delete(book_id)
+        n = _db().delete(book_id)
         if not n:
             raise HTTPException(404, "book not found")
         return {"deleted": n, "file_deleted": file_deleted}
@@ -684,10 +743,10 @@ def create_app(config_path: str) -> FastAPI:
     @app.post("/api/books/{book_id:path}/remove")
     def api_remove_book(book_id: str, background: BackgroundTasks, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         action = payload.get("action")
-        book = app.state.db.get(book_id)
+        book = _db().get(book_id)
         if not book:
             raise HTTPException(404, "book not found")
-        db = app.state.db
+        db = _db()
         if action == "delete_disk":
             fd = _delete_library_file(book)
             db.clear_file(book_id)
@@ -770,14 +829,14 @@ def create_app(config_path: str) -> FastAPI:
         author = str(payload.get("author", "")).strip()
         if not hc_id or not title:
             raise HTTPException(400, "id and title are required")
-        book_id = app.state.db.add_hardcover(hc_id, title, author)
+        book_id = _db().add_hardcover(hc_id, title, author)
         meta = payload.get("meta") or {}
         if isinstance(meta, dict):
             if payload.get("slug") and "hardcover_slug" not in meta:
                 meta["hardcover_slug"] = payload.get("slug")
             if payload.get("cover") and "cover_url" not in meta:
                 meta["cover_url"] = payload.get("cover")
-            app.state.db.set_metadata(book_id, {k: v for k, v in meta.items() if v is not None})
+            _db().set_metadata(book_id, {k: v for k, v in meta.items() if v is not None})
         return {"added": True, "id": book_id, "title": title, "author": author or "Unknown"}
 
     @app.get("/api/lookup")
@@ -818,7 +877,7 @@ def create_app(config_path: str) -> FastAPI:
         cfg = app.state.cfg
         isbns: list[str] = []
         if book_id:
-            book = app.state.db.get(book_id)
+            book = _db().get(book_id)
             if not book:
                 raise HTTPException(404, "book not found")
             title, author = book.title, book.author
@@ -867,7 +926,7 @@ def create_app(config_path: str) -> FastAPI:
         try:
             download_id = snatch_release(
                 cfg,
-                app.state.db,
+                _db(),
                 book_id=payload["book_id"],
                 title=payload["title"],
                 download_url=url,
@@ -914,14 +973,14 @@ def create_app(config_path: str) -> FastAPI:
             app.state.last_action = {"action": "run", "started": True, "at": _now()}
             return JSONResponse({"started": True, "action": "run"})
         if name == "retry":
-            n = app.state.db.retry_failed()
+            n = _db().retry_failed()
             app.state.last_action = {"action": "retry", "reset": n, "at": _now()}
             return JSONResponse({"reset": n})
         fn = _ACTIONS.get(name)
         if not fn:
             raise HTTPException(404, f"Unknown action: {name}")
         cfg = _reload_cfg()
-        result = fn(cfg, app.state.db)
+        result = fn(cfg, _db())
         app.state.last_action = {"action": name, "result": result, "at": _now()}
         return JSONResponse({"action": name, "result": result})
 
@@ -1272,7 +1331,7 @@ def create_app(config_path: str) -> FastAPI:
             "state_dir": str(cfg.state_dir),
             "log_dir": str(cfg.log_dir),
             "config_path": config_path,
-            "counts": app.state.db.counts(),
+            "counts": _db().counts(),
             "source": "https://github.com/  (MIT)",
         }
 
@@ -2637,3 +2696,4 @@ _PAGE_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
