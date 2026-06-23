@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from librarry.metadata import _author_sort, optimize_epub
+from librarry.metadata import _author_sort, _language_code, optimize_epub
 
 OPF_NS = "http://www.idpf.org/2007/opf"
 DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -75,6 +75,33 @@ def test_optimize_epub_embeds_metadata_and_cover(tmp_path):
     assert ("cover", "librarry-cover") in metas
 
 
+def test_optimize_epub_preserves_existing_cover_when_no_new_cover(tmp_path):
+    # An EPUB that already carries its own cover pointer must not lose it when
+    # we re-optimize and have no replacement cover (e.g. backfill, no ISBN hit).
+    opf = MINIMAL_OPF.replace(
+        "  </metadata>",
+        '    <meta name="cover" content="origcover"/>\n  </metadata>',
+    ).replace(
+        '<item id="ch1"',
+        '<item id="origcover" href="orig.jpg" media-type="image/jpeg"/>\n    <item id="ch1"',
+    )
+    epub = tmp_path / "book.epub"
+    with zipfile.ZipFile(epub, "w") as z:
+        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", CONTAINER)
+        z.writestr("OEBPS/content.opf", opf)
+        z.writestr("OEBPS/ch1.xhtml", "<html><body>hi</body></html>")
+        z.writestr("OEBPS/orig.jpg", b"\xff\xd8\xff" + b"o" * 100)
+
+    optimize_epub(epub, _book(), None)  # no new cover provided
+
+    with zipfile.ZipFile(epub) as z:
+        opf_out = ET.fromstring(z.read("OEBPS/content.opf"))
+        assert "OEBPS/orig.jpg" in z.namelist()
+    metas = {(m.get("name"), m.get("content")) for m in opf_out.iter(f"{{{OPF_NS}}}meta")}
+    assert ("cover", "origcover") in metas  # original cover pointer preserved
+
+
 def test_optimize_epub_no_cover_still_sets_metadata(tmp_path):
     epub = tmp_path / "book.epub"
     _make_epub(epub)
@@ -90,3 +117,32 @@ def test_author_sort():
     assert _author_sort("Brandon Sanderson") == "Sanderson, Brandon"
     assert _author_sort("Plato") == "Plato"
     assert _author_sort("Ursula K Le Guin") == "Guin, Ursula K Le"
+
+
+def test_language_code_normalizes_names_and_passes_codes():
+    assert _language_code("English") == "en"
+    assert _language_code("german") == "de"
+    assert _language_code("French") == "fr"
+    assert _language_code("") == "en"          # default
+    assert _language_code(None) == "en"
+    assert _language_code("en") == "en"         # already a code
+    assert _language_code("eng") == "eng"       # ISO-639-2 passthrough
+    assert _language_code("en-US") == "en-US"   # BCP-47 passthrough
+
+
+def test_optimize_epub_writes_iso_language_code(tmp_path):
+    epub = tmp_path / "book.epub"
+    _make_epub(epub)
+    optimize_epub(epub, _book(language="English"), None)
+    with zipfile.ZipFile(epub) as z:
+        opf = ET.fromstring(z.read("OEBPS/content.opf"))
+    lang = opf.find(f"{{{OPF_NS}}}metadata").find(f"{{{DC_NS}}}language")
+    assert lang.text == "en"   # not "English"
+
+    epub2 = tmp_path / "book2.epub"
+    _make_epub(epub2)
+    optimize_epub(epub2, _book(language="German"), None)
+    with zipfile.ZipFile(epub2) as z:
+        opf = ET.fromstring(z.read("OEBPS/content.opf"))
+    lang = opf.find(f"{{{OPF_NS}}}metadata").find(f"{{{DC_NS}}}language")
+    assert lang.text == "de"

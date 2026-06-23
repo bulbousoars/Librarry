@@ -40,6 +40,36 @@ def _author_sort(author: str) -> str:
     return f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) >= 2 else author
 
 
+# Hardcover stores language as a full name (e.g. "English"); EPUB/Kindle want a
+# BCP-47 / ISO-639 code (e.g. "en"). Map the common ones; pass through anything
+# that already looks like a code.
+_LANGUAGE_CODES = {
+    "english": "en", "german": "de", "french": "fr", "spanish": "es",
+    "italian": "it", "portuguese": "pt", "dutch": "nl", "russian": "ru",
+    "japanese": "ja", "chinese": "zh", "korean": "ko", "swedish": "sv",
+    "norwegian": "no", "danish": "da", "finnish": "fi", "polish": "pl",
+    "czech": "cs", "greek": "el", "turkish": "tr", "arabic": "ar",
+    "hebrew": "he", "hindi": "hi", "latin": "la", "ukrainian": "uk",
+    "romanian": "ro", "hungarian": "hu", "catalan": "ca", "icelandic": "is",
+}
+
+
+def _language_code(value) -> str:
+    """Normalize a language value to an ISO/BCP-47 code. Defaults to 'en'."""
+    v = str(value or "").strip()
+    if not v:
+        return "en"
+    low = v.lower()
+    if low in _LANGUAGE_CODES:
+        return _LANGUAGE_CODES[low]
+    # Already a code: "en", "eng", or BCP-47 like "en-US" / "pt-BR".
+    primary = v.split("-")[0]
+    if primary.isalpha() and len(primary) <= 3:
+        return v if "-" in v else low
+    # Unknown full name — leave as-is (lowercased) rather than mislabel as English.
+    return low
+
+
 def fetch_cover(isbns: list[str], session: requests.Session | None = None) -> bytes | None:
     sess = session or requests
     for isbn in [i for i in isbns if i]:
@@ -106,7 +136,7 @@ def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
             cre.set(f"{{{OPF_NS}}}role", "aut")
             cre.set(f"{{{OPF_NS}}}file-as", _author_sort(book.author))
         _drop(DC_NS, "language")
-        _dc("language", book.language or "en")
+        _dc("language", _language_code(book.language))
         if book.publisher:
             _drop(DC_NS, "publisher")
             _dc("publisher", book.publisher)
@@ -121,9 +151,10 @@ def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
         for g in [x.strip() for x in (book.genres or "").split(",") if x.strip()]:
             _dc("subject", g)
 
-        # series (Calibre convention, read by Kindle tooling)
+        # series (Calibre convention; useful for Calibre/other readers — Kindle
+        # manages sideloaded series server-side and ignores these).
         for m in meta.findall(f"{{{OPF_NS}}}meta"):
-            if m.get("name") in ("calibre:series", "calibre:series_index", "cover"):
+            if m.get("name") in ("calibre:series", "calibre:series_index"):
                 meta.remove(m)
         if book.series:
             sm = ET.SubElement(meta, f"{{{OPF_NS}}}meta")
@@ -141,7 +172,12 @@ def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
             opf_dir = os.path.dirname(opf_path)
             cover_name = "librarry-cover.jpg"
             cover_arcname = f"{opf_dir}/{cover_name}" if opf_dir else cover_name
-            # remove any prior librarry cover item
+            # Replace only when we actually have a new cover: drop the old cover
+            # pointer + our prior cover item, then add the fresh one. When no new
+            # cover is fetched we leave any existing cover untouched.
+            for m in meta.findall(f"{{{OPF_NS}}}meta"):
+                if m.get("name") == "cover":
+                    meta.remove(m)
             for it in list(manifest.findall(f"{{{OPF_NS}}}item")):
                 if it.get("id") == "librarry-cover":
                     manifest.remove(it)
@@ -185,7 +221,7 @@ def _optimize_with_calibre(path: Path, book, cover_file: Path | None) -> bool:
     if book.publisher:
         args += ["--publisher", book.publisher]
     if book.language:
-        args += ["--language", book.language]
+        args += ["--language", _language_code(book.language)]
     if book.isbn_13 or book.isbn_10:
         args += ["--isbn", book.isbn_13 or book.isbn_10]
     if book.genres:
