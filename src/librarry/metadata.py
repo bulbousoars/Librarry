@@ -70,21 +70,40 @@ def _language_code(value) -> str:
     return low
 
 
-def fetch_cover(isbns: list[str], session: requests.Session | None = None) -> bytes | None:
+_COVER_EXT = {
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/gif": "gif", "image/webp": "webp",
+}
+
+
+def _fetch_image(url: str, session: requests.Session | None = None) -> tuple[bytes, str] | None:
+    """Download an image URL; return (bytes, content_type) or None."""
+    if not url:
+        return None
     sess = session or requests
+    try:
+        r = sess.get(url, headers={"User-Agent": UA}, timeout=20)
+    except Exception:
+        return None
+    ctype = (r.headers.get("content-type", "") or "").split(";")[0].strip().lower()
+    if r.status_code == 200 and ctype.startswith("image") and len(r.content) > 2000:
+        return r.content, ctype
+    return None
+
+
+def fetch_cover_url(url: str, session: requests.Session | None = None) -> tuple[bytes, str] | None:
+    """Fetch a cover from a direct image URL (e.g. Hardcover's cover_url)."""
+    return _fetch_image(url, session)
+
+
+def fetch_cover(isbns: list[str], session: requests.Session | None = None) -> bytes | None:
+    """Fallback cover lookup via OpenLibrary by ISBN (always JPEG)."""
     for isbn in [i for i in isbns if i]:
-        try:
-            r = sess.get(
-                f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg",
-                params={"default": "false"},
-                headers={"User-Agent": UA},
-                timeout=20,
-            )
-            ctype = r.headers.get("content-type", "")
-            if r.status_code == 200 and ctype.startswith("image") and len(r.content) > 2000:
-                return r.content
-        except Exception:
-            continue
+        got = _fetch_image(
+            f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false", session
+        )
+        if got:
+            return got[0]
     return None
 
 
@@ -97,7 +116,7 @@ def _opf_path(zf: zipfile.ZipFile) -> str | None:
     return rf.get("full-path") if rf is not None else None
 
 
-def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
+def optimize_epub(path: Path, book, cover: bytes | None, cover_mime: str = "image/jpeg") -> bool:
     """Rewrite an EPUB's OPF with full metadata + embed a cover. Returns True on change."""
     ET.register_namespace("opf", OPF_NS)
     ET.register_namespace("dc", DC_NS)
@@ -169,12 +188,14 @@ def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
 
         cover_arcname = None
         if cover:
+            ext = _COVER_EXT.get((cover_mime or "").lower(), "jpg")
+            media_type = cover_mime if (cover_mime or "").lower() in _COVER_EXT else "image/jpeg"
             opf_dir = os.path.dirname(opf_path)
-            cover_name = "librarry-cover.jpg"
+            cover_name = f"librarry-cover.{ext}"
             cover_arcname = f"{opf_dir}/{cover_name}" if opf_dir else cover_name
             # Replace only when we actually have a new cover: drop the old cover
-            # pointer + our prior cover item, then add the fresh one. When no new
-            # cover is fetched we leave any existing cover untouched.
+            # pointer + our prior cover item(s), then add the fresh one. When no
+            # new cover is fetched we leave any existing cover untouched.
             for m in meta.findall(f"{{{OPF_NS}}}meta"):
                 if m.get("name") == "cover":
                     meta.remove(m)
@@ -184,7 +205,7 @@ def optimize_epub(path: Path, book, cover: bytes | None) -> bool:
             item = ET.SubElement(manifest, f"{{{OPF_NS}}}item")
             item.set("id", "librarry-cover")
             item.set("href", cover_name)
-            item.set("media-type", "image/jpeg")
+            item.set("media-type", media_type)
             item.set("properties", "cover-image")  # EPUB3
             cm = ET.SubElement(meta, f"{{{OPF_NS}}}meta")  # EPUB2 (Kindle reads this)
             cm.set("name", "cover")
@@ -243,15 +264,24 @@ def optimize_ebook(cfg, book, path: Path) -> dict:
     if not cfg.raw.get("import", {}).get("optimize_metadata", True):
         return {"optimized": False, "reason": "disabled"}
     ext = path.suffix.lower().lstrip(".")
-    cover = fetch_cover([book.isbn_13, book.isbn_10])
+    # Prefer Hardcover's direct cover URL (reliable, present for most books);
+    # fall back to OpenLibrary by ISBN (always JPEG).
+    cover = cover_mime = None
+    got = fetch_cover_url(getattr(book, "cover_url", "") or "")
+    if got:
+        cover, cover_mime = got
+    if not cover:
+        cover = fetch_cover([book.isbn_13, book.isbn_10])
+        cover_mime = "image/jpeg" if cover else None
     try:
         if ext == "epub":
-            changed = optimize_epub(path, book, cover)
+            changed = optimize_epub(path, book, cover, cover_mime or "image/jpeg")
             return {"optimized": changed, "cover": bool(cover), "method": "epub"}
         # azw3/mobi/etc → Calibre if available
         cover_file = None
         if cover:
-            cf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            suffix = "." + _COVER_EXT.get((cover_mime or "").lower(), "jpg")
+            cf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             cf.write(cover)
             cf.close()
             cover_file = Path(cf.name)

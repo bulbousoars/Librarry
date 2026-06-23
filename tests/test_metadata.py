@@ -102,6 +102,55 @@ def test_optimize_epub_preserves_existing_cover_when_no_new_cover(tmp_path):
     assert ("cover", "origcover") in metas  # original cover pointer preserved
 
 
+def test_optimize_epub_honors_cover_mime(tmp_path):
+    epub = tmp_path / "b.epub"
+    _make_epub(epub)
+    optimize_epub(epub, _book(), b"\x89PNG\r\n" + b"x" * 3000, "image/png")
+    with zipfile.ZipFile(epub) as z:
+        assert "OEBPS/librarry-cover.png" in z.namelist()
+        opf = ET.fromstring(z.read("OEBPS/content.opf"))
+    item = next(i for i in opf.iter(f"{{{OPF_NS}}}item") if i.get("id") == "librarry-cover")
+    assert item.get("media-type") == "image/png"
+    assert item.get("href") == "librarry-cover.png"
+
+
+def test_optimize_ebook_prefers_hardcover_cover_url(tmp_path, monkeypatch):
+    import librarry.metadata as m
+    calls = {"url": 0, "isbn": 0}
+
+    def fake_url(url, session=None):
+        calls["url"] += 1
+        return (b"\x89PNG\r\n" + b"x" * 3000, "image/png")
+
+    def fake_isbn(isbns, session=None):
+        calls["isbn"] += 1
+        return b"\xff\xd8\xff" + b"x" * 3000
+
+    monkeypatch.setattr(m, "fetch_cover_url", fake_url)
+    monkeypatch.setattr(m, "fetch_cover", fake_isbn)
+    epub = tmp_path / "b.epub"
+    _make_epub(epub)
+    cfg = types.SimpleNamespace(raw={})
+    res = m.optimize_ebook(cfg, _book(cover_url="https://hc/cover.png"), epub)
+    assert res["optimized"] and res["cover"]
+    assert calls["url"] == 1 and calls["isbn"] == 0  # cover_url wins; no OL fallback
+    with zipfile.ZipFile(epub) as z:
+        assert "OEBPS/librarry-cover.png" in z.namelist()
+
+
+def test_optimize_ebook_falls_back_to_isbn_cover(tmp_path, monkeypatch):
+    import librarry.metadata as m
+    monkeypatch.setattr(m, "fetch_cover_url", lambda *a, **k: None)
+    monkeypatch.setattr(m, "fetch_cover", lambda *a, **k: b"\xff\xd8\xff" + b"x" * 3000)
+    epub = tmp_path / "b.epub"
+    _make_epub(epub)
+    cfg = types.SimpleNamespace(raw={})
+    res = m.optimize_ebook(cfg, _book(cover_url=""), epub)
+    assert res["cover"]
+    with zipfile.ZipFile(epub) as z:
+        assert "OEBPS/librarry-cover.jpg" in z.namelist()
+
+
 def test_optimize_epub_no_cover_still_sets_metadata(tmp_path):
     epub = tmp_path / "book.epub"
     _make_epub(epub)
