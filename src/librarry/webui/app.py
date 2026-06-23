@@ -2004,6 +2004,9 @@ _PAGE_HTML = """<!DOCTYPE html>
                 <div>Released</div><div>${esc(b.release_date || b.release_year || '')}</div>
                 <div>Genres</div><div>${esc(b.genres||'')}</div>
               </div>
+              ${b.status === 'imported' && b.library_path ? `<div class="toolbar" style="margin-top:1rem">
+                <button class="primary" onclick="VIEWS.resendKindle('${esc(b.id)}')">Re-send to Kindle</button>
+              </div>` : ''}
             </div>
           </div>
         </div>
@@ -2027,6 +2030,16 @@ _PAGE_HTML = """<!DOCTYPE html>
       });
       toast('Book saved');
       await VIEWS.book(id);
+    };
+
+    VIEWS.resendKindle = async (id) => {
+      try {
+        await jpost('/api/books/' + encodeURIComponent(id) + '/resend_kindle', {});
+        toast('Sent to Kindle');
+        await VIEWS.book(id);
+      } catch (err) {
+        toast('Kindle send failed: ' + err.message);
+      }
     };
 
     VIEWS.authors = async () => {
