@@ -1,10 +1,63 @@
 import tempfile
+import base64
+import hashlib
+import hmac
+import json
+import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 
 from librarry.db import Database
 from librarry.webui.app import create_app
+
+
+def _jwt_hs256(claims: dict, secret: str) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    parts = [
+        base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("="),
+        base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("="),
+    ]
+    sig = hmac.new(secret.encode(), ".".join(parts).encode(), hashlib.sha256).digest()
+    parts.append(base64.urlsafe_b64encode(sig).decode().rstrip("="))
+    return ".".join(parts)
+
+
+def test_oidc_client_validates_standard_hs256_claims():
+    from librarry.auth import OIDCClient, OIDCError
+    from librarry.config import OIDCConfig
+
+    cfg = OIDCConfig(
+        enabled=True,
+        issuer="https://issuer.example",
+        client_id="librarry",
+        client_secret="client-secret",
+        redirect_uri="http://testserver/auth/oidc/callback",
+    )
+    client = OIDCClient(cfg)
+    token = _jwt_hs256(
+        {
+            "iss": "https://issuer.example",
+            "sub": "stable-sub",
+            "aud": "librarry",
+            "exp": int(time.time()) + 600,
+            "nonce": "nonce-1",
+            "email": "login@example.com",
+        },
+        "client-secret",
+    )
+
+    claims = client.validate_id_token(token, "nonce-1", {"issuer": "https://issuer.example"})
+    assert claims["sub"] == "stable-sub"
+    assert claims["email"] == "login@example.com"
+
+    try:
+        client.validate_id_token(token, "wrong", {"issuer": "https://issuer.example"})
+    except OIDCError as exc:
+        assert "nonce" in str(exc)
+    else:
+        raise AssertionError("nonce mismatch should fail")
 
 
 def test_user_store_self_provisions_oidc_user_enabled_with_own_db_and_kindle_disabled():
@@ -143,6 +196,87 @@ torznab_indexers: []
         assert login.status_code == 200
         assert login.json()["user"]["is_admin"] is True
         assert client.get("/api/status").status_code == 200
+
+
+def test_webui_oidc_callback_self_provisions_enabled_user_without_kindle_email(monkeypatch):
+    import librarry.webui.app as webapp
+
+    class FakeOIDCClient:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def authorization_url(self, state, nonce):
+            return f"https://issuer.example/authorize?state={state}&nonce={nonce}"
+
+        def callback_claims(self, code, nonce):
+            assert code == "abc"
+            assert nonce
+            return {
+                "iss": "https://issuer.example",
+                "sub": "stable-sub",
+                "email": "login@example.com",
+                "name": "Reader One",
+                "preferred_username": "reader1",
+            }
+
+    monkeypatch.setattr(webapp, "OIDCClient", FakeOIDCClient)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+  oidc:
+    enabled: true
+    issuer: https://issuer.example
+    client_id: librarry
+    client_secret: secret
+    redirect_uri: http://testserver/auth/oidc/callback
+    scopes: [openid, email, profile]
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        client = TestClient(app)
+
+        start = client.get("/auth/oidc/start", follow_redirects=False)
+        assert start.status_code == 307
+        qs = parse_qs(urlparse(start.headers["location"]).query)
+        state = qs["state"][0]
+
+        callback = client.get(
+            f"/auth/oidc/callback?code=abc&state={state}",
+            follow_redirects=False,
+        )
+        assert callback.status_code == 307
+        assert client.get("/api/status").status_code == 200
+
+        users = app.state.users.list_users()
+        assert len(users) == 1
+        assert users[0].enabled is True
+        assert users[0].email == "login@example.com"
+        kindle = app.state.users.get_kindle_settings(users[0].id)
+        assert kindle.kindle_to == ""
+        assert kindle.send_kindle is False
 
 
 def _write_config(root: Path) -> Path:

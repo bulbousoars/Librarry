@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import secrets
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -14,9 +15,10 @@ from typing import Any
 import requests
 import yaml
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from librarry import __version__, hardcover
+from librarry.auth import OIDCClient, OIDCError
 from librarry.hardcover import HardcoverRateLimited
 from librarry.config import AppConfig, load_config
 from librarry.db import Database
@@ -42,6 +44,7 @@ _ACTIONS = {
 _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_user", default=None)
 
 SESSION_COOKIE = "librarry_session"
+OIDC_LOGIN_COOKIE = "librarry_oidc_login"
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -419,6 +422,59 @@ def create_app(config_path: str) -> FastAPI:
     def auth_logout() -> JSONResponse:
         response = JSONResponse({"authenticated": False})
         response.delete_cookie(SESSION_COOKIE)
+        return response
+
+    @app.get("/auth/oidc/start")
+    def auth_oidc_start() -> RedirectResponse:
+        if not _auth_enabled() or not app.state.cfg.auth.oidc.enabled:
+            raise HTTPException(404, "OIDC login is not enabled")
+        state = secrets.token_urlsafe(24)
+        nonce = secrets.token_urlsafe(24)
+        url = OIDCClient(app.state.cfg.auth.oidc).authorization_url(state, nonce)
+        response = RedirectResponse(url)
+        response.set_cookie(
+            OIDC_LOGIN_COOKIE,
+            _sign_session({"state": state, "nonce": nonce}, _session_secret()),
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            max_age=600,
+        )
+        return response
+
+    @app.get("/auth/oidc/callback")
+    def auth_oidc_callback(
+        request: Request,
+        code: str = Query(default=""),
+        state: str = Query(default=""),
+    ) -> RedirectResponse:
+        if not _auth_enabled() or not app.state.cfg.auth.oidc.enabled:
+            raise HTTPException(404, "OIDC login is not enabled")
+        login = _unsign_session(request.cookies.get(OIDC_LOGIN_COOKIE, ""), _session_secret())
+        if not login or not state or state != login.get("state"):
+            raise HTTPException(400, "OIDC state is invalid")
+        if not code:
+            raise HTTPException(400, "OIDC code is required")
+        try:
+            claims = OIDCClient(app.state.cfg.auth.oidc).callback_claims(code, str(login.get("nonce") or ""))
+        except OIDCError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        user = app.state.users.upsert_oidc_user(
+            issuer=str(claims.get("iss") or app.state.cfg.auth.oidc.issuer),
+            subject=str(claims.get("sub") or ""),
+            email=str(claims.get("email") or ""),
+            display_name=str(claims.get("name") or claims.get("preferred_username") or claims.get("email") or ""),
+            preferred_username=str(claims.get("preferred_username") or ""),
+        )
+        response = RedirectResponse("/")
+        response.set_cookie(
+            SESSION_COOKIE,
+            _sign_session({"user_id": user.id, "auth_type": "oidc"}, _session_secret()),
+            httponly=True,
+            samesite="lax",
+            secure=False,
+        )
+        response.delete_cookie(OIDC_LOGIN_COOKIE)
         return response
 
     # ----- core data -----
