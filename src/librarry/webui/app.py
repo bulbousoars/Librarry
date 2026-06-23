@@ -312,7 +312,9 @@ def create_app(config_path: str) -> FastAPI:
         return (b.status.title(), "")
 
     def _hardcover_url(b) -> str:
-        slug = b.hardcover_slug or _url_slug(b.title)
+        slug = b.hardcover_slug
+        if not slug and (b.source == "hardcover" or b.hardcover_book_id):
+            slug = _url_slug(b.title)
         return f"https://hardcover.app/books/{slug}" if slug else ""
 
     def _book_json(b) -> dict[str, Any]:

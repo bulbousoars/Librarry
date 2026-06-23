@@ -997,6 +997,22 @@ def test_books_api_exposes_local_path_hardcover_url_and_progress():
         assert "ready for import" in b["progress_detail"]
 
 
+def test_manual_book_without_hardcover_slug_does_not_guess_hardcover_url():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        client = TestClient(create_app(str(config)))
+
+        bid = client.post(
+            "/api/books/add",
+            json={"title": "Between Two Fires", "author": "Christopher Buehlman"},
+        ).json()["id"]
+
+        b = client.get(f"/api/books/{bid}").json()
+        assert b["hardcover_slug"] is None
+        assert b["hardcover_url"] == ""
+
+
 def test_book_detail_extras_notes_tags_and_cover_override():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
