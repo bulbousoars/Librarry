@@ -41,7 +41,7 @@ def send_to_kindle(
         return
 
     msg = EmailMessage()
-    msg["Subject"] = f"{title} - {author}"
+    msg["Subject"] = title
     msg["From"] = cfg.kindle_from or cfg.kindle_smtp_user
     msg["To"] = recipient
     msg.set_content(f"Librarry imported: {title} by {author}")

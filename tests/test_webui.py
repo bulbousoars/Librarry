@@ -594,6 +594,93 @@ torznab_indexers: []
         assert sent["smtp_user"] == "smtp-user"
 
 
+def test_user_can_resend_imported_book_to_kindle(monkeypatch):
+    import librarry.webui.app as webapp
+
+    sent = {}
+
+    def fake_send(cfg, path, *, title, author, kindle_to=None, send_kindle=None):
+        sent.update(
+            {
+                "path": Path(path),
+                "title": title,
+                "author": author,
+                "kindle_to": kindle_to,
+                "send_kindle": send_kindle,
+            }
+        )
+
+    monkeypatch.setattr(webapp, "send_to_kindle", fake_send)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.yaml"
+        config.write_text(
+            f"""
+database: {(root / 'legacy.db').as_posix()}
+state_dir: {(root / 'state').as_posix()}
+log_dir: {(root / 'logs').as_posix()}
+library_dir: {(root / 'library').as_posix()}
+download_dir: {(root / 'downloads').as_posix()}
+download_subdir: books
+webui:
+  enabled: true
+  port: 5300
+auth:
+  enabled: true
+  session_secret: test-session-secret
+secrets:
+  vault: {(root / 'state' / 'secrets.vault').as_posix()}
+  key_file: {(root / 'state' / 'secrets.key').as_posix()}
+hardcover:
+  token: ""
+kindle:
+  smtp_server: smtp.example.com
+  smtp_port: 465
+  use_ssl: true
+  from: sender@example.com
+  user: smtp-user
+  password: smtp-pass
+newznab_indexers: []
+torznab_indexers: []
+""",
+            encoding="utf-8",
+        )
+        app = create_app(str(config))
+        reader = app.state.users.upsert_oidc_user(
+            issuer="https://issuer.example",
+            subject="reader",
+            email="login@example.com",
+            display_name="Reader",
+        )
+        app.state.users.set_kindle_settings(
+            reader.id,
+            kindle_to="reader@kindle.com",
+            send_kindle=True,
+        )
+        book_file = root / "library" / "Author" / "Book.epub"
+        book_file.parent.mkdir(parents=True)
+        book_file.write_bytes(b"epub")
+        db = Database(reader.database_path)
+        bid = db.add_manual("Book", "Author")
+        db.mark_imported(bid, str(book_file), "epub")
+
+        client = TestClient(app)
+        client.cookies.set(
+            webapp.SESSION_COOKIE,
+            webapp._sign_session({"user_id": reader.id, "auth_type": "oidc"}, "test-session-secret"),
+        )
+        result = client.post(f"/api/books/{bid}/resend_kindle")
+
+        assert result.status_code == 200
+        assert result.json()["sent"] is True
+        assert sent["path"] == book_file
+        assert sent["title"] == "Book"
+        assert sent["author"] == "Author"
+        assert sent["kindle_to"] == "reader@kindle.com"
+        assert sent["send_kindle"] is True
+
+
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"
     config = root / "config.yaml"

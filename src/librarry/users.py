@@ -313,6 +313,19 @@ class UserStore:
             )
         return self.get_kindle_settings(user_id)
 
+    def set_kindle_send_status(self, user_id: str, status: str) -> KindleSettings:
+        with self.connect() as conn:
+            self._ensure_kindle_settings(conn, user_id)
+            conn.execute(
+                """
+                UPDATE user_kindle_settings
+                SET last_send_status=?, last_send_at=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (status[:500], utcnow(), utcnow(), user_id),
+            )
+        return self.get_kindle_settings(user_id)
+
 
 def _hash_password(password: str, salt_hex: str) -> str:
     return hashlib.pbkdf2_hmac(

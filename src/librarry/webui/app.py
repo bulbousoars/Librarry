@@ -646,6 +646,39 @@ def create_app(config_path: str) -> FastAPI:
         book_id = _db().add_manual(title, author)
         return {"added": True, "id": book_id, "title": title, "author": author or "Unknown"}
 
+    @app.post("/api/books/{book_id:path}/resend_kindle")
+    def api_resend_kindle(book_id: str) -> dict[str, Any]:
+        effective = _effective()
+        if not effective:
+            raise HTTPException(401, "authentication required")
+        settings = app.state.users.get_kindle_settings(effective.id)
+        if not settings.send_kindle:
+            raise HTTPException(400, "Send to Kindle is disabled for this user")
+        if not settings.kindle_to:
+            raise HTTPException(400, "Kindle email is not configured for this user")
+        book = _db().get(book_id)
+        if not book:
+            raise HTTPException(404, "book not found")
+        if book.status != "imported" or not book.library_path:
+            raise HTTPException(400, "book is not imported")
+        path = Path(book.library_path)
+        if not path.is_file():
+            raise HTTPException(404, "book file not found")
+        try:
+            send_to_kindle(
+                app.state.cfg,
+                path,
+                title=book.title,
+                author=book.author,
+                kindle_to=settings.kindle_to,
+                send_kindle=settings.send_kindle,
+            )
+        except Exception as exc:
+            app.state.users.set_kindle_send_status(effective.id, f"failed: {exc}")
+            raise HTTPException(500, f"Kindle send failed: {exc}") from exc
+        app.state.users.set_kindle_send_status(effective.id, f"sent: {book.title}")
+        return {"sent": True, "book_id": book.id}
+
     @app.get("/api/books/{book_id:path}")
     def api_book_detail(book_id: str) -> dict[str, Any]:
         book = _db().get(book_id)
