@@ -1245,6 +1245,7 @@ def create_app(config_path: str) -> FastAPI:
             "hardcover": {
                 "rate_limit_per_minute": (raw.get("hardcover") or {}).get("rate_limit_per_minute", 60),
                 "min_interval_seconds": (raw.get("hardcover") or {}).get("min_interval_seconds", 1.0),
+                "token_set": bool(app.state.cfg.hardcover_token),
             },
             "providers": {
                 "libgen": {
@@ -1297,6 +1298,11 @@ def create_app(config_path: str) -> FastAPI:
             hc["rate_limit_per_minute"] = max(1, int(payload["rate_limit_per_minute"]))
         if "min_interval_seconds" in payload:
             hc["min_interval_seconds"] = max(0.0, float(payload["min_interval_seconds"]))
+        # The Hardcover API token is written to the encrypted vault and referenced
+        # from config (same pattern as SMTP/indexer creds). Blank/omitted = keep.
+        if "token" in payload and str(payload["token"]).strip():
+            _vault_set("hardcover_token", str(payload["token"]).strip())
+            hc["token"] = "secret:hardcover_token"
         if not hc:
             raise HTTPException(400, "nothing to save")
         _save_config_patch({"hardcover": hc})
@@ -2808,6 +2814,12 @@ _PAGE_HTML = """<!DOCTYPE html>
           </tr>`).join('')}</tbody></table>
           <div class="muted" style="margin-top:0.75rem">Librarry pulls "Want to Read" from Hardcover. Run a sync from the Tasks page.</div>
         </div>
+        <div class="panel"><h3>Hardcover API token ${hc.token_set?'<span class="pill on">set (vault)</span>':'<span class="pill off">not set</span>'}</h3>
+          <div class="muted" style="margin-bottom:0.8rem">Used to read your "Want to Read" shelf and to mark books Want to Read when you add them. Stored in the encrypted vault. Get it from <a href="https://hardcover.app/account/api" target="_blank" rel="noopener">hardcover.app/account/api</a>.</div>
+          <div class="field"><label>API token</label>
+            <input type="password" id="hc_token" value="" placeholder="${hc.token_set?'•••••••• — leave blank to keep current':'Bearer token'}" autocomplete="new-password"></div>
+          <button class="primary" onclick="VIEWS.saveHardcoverToken()">Save token</button>
+        </div>
         <div class="panel"><h3>Hardcover API rate limit</h3>
           <div class="muted" style="margin-bottom:0.8rem">All Hardcover requests (sync + search) share one throttle so we stay polite and avoid getting rate-limited or banned. Lower = gentler on their server.</div>
           <div class="row">
@@ -2824,6 +2836,15 @@ _PAGE_HTML = """<!DOCTYPE html>
           min_interval_seconds: Number(val('hc_int')),
         });
         toast('Hardcover rate limit saved');
+      } catch (err) { toast('Save failed: ' + err.message); }
+    };
+    VIEWS.saveHardcoverToken = async () => {
+      const token = val('hc_token');
+      if (!token) { toast('Enter a token to save'); return; }
+      try {
+        await jpost('/api/config/hardcover', { token });
+        toast('Hardcover token saved');
+        VIEWS.importlists();
       } catch (err) { toast('Save failed: ' + err.message); }
     };
 

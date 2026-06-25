@@ -782,6 +782,36 @@ def test_smtp_credentials_saved_to_vault_and_kept_when_blank():
         assert resolver.vault.get("kindle_smtp_password", key_file=resolver.key_file) == "app-secret-pw"
 
 
+def test_hardcover_token_saved_to_vault_and_reflected():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        resolver = app.state.cfg.resolver
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        resolver.vault.init_keyfile(resolver.key_file)
+        client = TestClient(app)
+
+        # No resolvable token yet (vault empty).
+        assert client.get("/api/config").json()["hardcover"]["token_set"] is False
+
+        r = client.post("/api/config/hardcover", json={"token": "hc-secret-tok"})
+        assert r.status_code == 200
+
+        import yaml as _yaml
+        raw = _yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert raw["hardcover"]["token"] == "secret:hardcover_token"
+        assert resolver.vault.get("hardcover_token", key_file=resolver.key_file) == "hc-secret-tok"
+        # Reflected after reload, and rate-limit fields untouched.
+        hc = client.get("/api/config").json()["hardcover"]
+        assert hc["token_set"] is True
+        assert hc["rate_limit_per_minute"] == 60
+
+        # A rate-limit-only save must not wipe the stored token.
+        client.post("/api/config/hardcover", json={"rate_limit_per_minute": 30})
+        assert _yaml.safe_load(config.read_text(encoding="utf-8"))["hardcover"]["token"] == "secret:hardcover_token"
+
+
 def test_resend_uses_global_config_without_auth(monkeypatch):
     import librarry.webui.app as webapp
 
