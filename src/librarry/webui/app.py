@@ -1202,6 +1202,7 @@ def create_app(config_path: str) -> FastAPI:
                 "to": kindle.get("to", ""),
                 "from": app.state.cfg.kindle_from,
                 "from_set": _is_set(kindle.get("from")) or _is_set(kindle.get("from_secret")),
+                "user": app.state.cfg.kindle_smtp_user,
                 "user_set": _is_set(kindle.get("user")) or _is_set(kindle.get("user_secret")),
                 "password_set": _is_set(kindle.get("password")) or _is_set(kindle.get("password_secret")),
                 "send_kindle": bool(imp.get("send_kindle", False)),
@@ -1313,8 +1314,17 @@ def create_app(config_path: str) -> FastAPI:
         if "from" in payload:
             # The from address is a plain (non-secret) email; storing it directly
             # in config.yaml supersedes any prior secret:/env: reference so it can
-            # be managed from the UI. SMTP user/password stay in the vault.
+            # be managed from the UI.
             kindle["from"] = str(payload["from"]).strip()
+        # SMTP username and password are written to the encrypted vault and
+        # referenced from config (same pattern as download-client credentials).
+        # A blank/omitted value leaves the existing secret untouched.
+        for field, secret_name in (("user", "kindle_smtp_user"), ("password", "kindle_smtp_password")):
+            if field in payload:
+                val = str(payload[field])
+                if val.strip():
+                    _vault_set(secret_name, val.strip())
+                    kindle[field] = f"secret:{secret_name}"
         patch: dict[str, Any] = {"kindle": kindle} if kindle else {}
         if "send_kindle" in payload:
             patch["import"] = {"send_kindle": bool(payload["send_kindle"])}
@@ -2506,12 +2516,11 @@ _PAGE_HTML = """<!DOCTYPE html>
           <div class="field"><label>From address (sender)</label><input type="text" id="e_from" value="${esc(e.from||'')}" placeholder="you@example.com">
             <div class="hint">The address books are emailed from. Must be an authorized sender on your Kindle account and accepted by the SMTP server.</div>
           </div>
-          <div class="field"><label>Credentials (managed in encrypted vault)</label>
-            <div class="kv">
-              <div>SMTP user</div><div>${sec(e.user_set)}</div>
-              <div>SMTP password</div><div>${sec(e.password_set)}</div>
-            </div>
-            <div class="hint">Set secrets with: <code>librarry secrets set kindle_smtp_user|kindle_smtp_password</code></div>
+          <div class="field"><label>SMTP username ${sec(e.user_set)}</label>
+            <input type="text" id="e_user" value="${esc(e.user||'')}" placeholder="you@gmail.com" autocomplete="off"></div>
+          <div class="field"><label>SMTP password ${sec(e.password_set)}</label>
+            <input type="password" id="e_pass" value="" placeholder="${e.password_set ? '•••••••• — leave blank to keep current' : 'app password'}" autocomplete="new-password">
+            <div class="hint">Username and password are stored in the encrypted vault. Leave the password blank to keep the current one. For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">App Password</a>, not your account password.</div>
           </div>
           <button class="primary" onclick="VIEWS.saveEmail()">Save</button>
         </div>
@@ -2553,15 +2562,22 @@ _PAGE_HTML = """<!DOCTYPE html>
     };
     VIEWS.saveEmail = async () => {
       try {
-        await jpost('/api/config/email', {
+        const payload = {
           send_kindle: document.getElementById('e_send').checked,
           smtp_server: document.getElementById('e_server').value,
           smtp_port: Number(document.getElementById('e_port').value),
           use_ssl: document.getElementById('e_ssl').checked,
           to: document.getElementById('e_to').value,
           from: document.getElementById('e_from').value,
-        });
+          user: document.getElementById('e_user').value,
+        };
+        // Only send the password when the user typed one — blank keeps the current.
+        const pass = document.getElementById('e_pass').value;
+        if (pass) payload.password = pass;
+        await jpost('/api/config/email', payload);
+        document.getElementById('e_pass').value = '';
         toast('Email settings saved');
+        VIEWS.email();
       } catch (err) { toast('Save failed: ' + err.message); }
     };
 

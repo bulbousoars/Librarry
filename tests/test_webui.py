@@ -746,6 +746,42 @@ def test_from_address_is_editable_and_supersedes_secret():
         assert raw["kindle"]["from"] == "sender@dugganco.com"  # plain value, secret superseded
 
 
+def test_smtp_credentials_saved_to_vault_and_kept_when_blank():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        # Initialise the encrypted vault (keyfile mode) so credentials can be stored.
+        resolver = app.state.cfg.resolver
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        resolver.vault.init_keyfile(resolver.key_file)
+        client = TestClient(app)
+
+        r = client.post(
+            "/api/config/email",
+            json={"user": "smtp-bob@gmail.com", "password": "app-secret-pw"},
+        )
+        assert r.status_code == 200
+
+        # Config now references the vault, not plaintext.
+        import yaml as _yaml
+        raw = _yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert raw["kindle"]["user"] == "secret:kindle_smtp_user"
+        assert raw["kindle"]["password"] == "secret:kindle_smtp_password"
+
+        # The vault holds the real values; username is surfaced, password is not.
+        cfg = client.get("/api/config").json()["email"]
+        assert cfg["user"] == "smtp-bob@gmail.com"
+        assert cfg["user_set"] is True and cfg["password_set"] is True
+        assert "password" not in cfg
+
+        # Saving again without a password leaves the stored one untouched.
+        r2 = client.post("/api/config/email", json={"user": "smtp-bob@gmail.com", "smtp_port": 587})
+        assert r2.status_code == 200
+        assert client.get("/api/config").json()["email"]["password_set"] is True
+        assert resolver.vault.get("kindle_smtp_password", key_file=resolver.key_file) == "app-secret-pw"
+
+
 def test_resend_uses_global_config_without_auth(monkeypatch):
     import librarry.webui.app as webapp
 
