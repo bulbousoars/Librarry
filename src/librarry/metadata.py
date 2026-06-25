@@ -230,6 +230,63 @@ def optimize_epub(path: Path, book, cover: bytes | None, cover_mime: str = "imag
     return True
 
 
+# Stamped into a PDF's "producer" field so we don't prepend a second cover page
+# if the same file is optimized again.
+_PDF_MARKER = "librarry"
+
+
+def optimize_pdf(path: Path, book, cover: bytes | None, cover_mime: str = "image/jpeg") -> bool:
+    """Embed title/author metadata and prepend the cover as the PDF's first page.
+
+    Kindle builds a PDF's cover thumbnail by rendering page 1 — there is no
+    metadata cover slot it reads — so a real first page is the only way to make
+    the Hardcover cover show. Idempotent: a PDF we've already stamped is not given
+    a second cover page. Best-effort: returns False (never raises) if PyMuPDF is
+    missing or the file can't be processed.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        log.warning("PyMuPDF not installed; cannot embed cover/metadata in PDF %s", path.name)
+        return False
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        doc = fitz.open(path)
+        try:
+            md = dict(doc.metadata or {})
+            already_stamped = md.get("producer") == _PDF_MARKER
+            want = dict(md)
+            if book.title:
+                want["title"] = book.title
+            if book.author:
+                want["author"] = book.author
+            want["producer"] = _PDF_MARKER
+            changed = False
+            if want != md:
+                doc.set_metadata(want)
+                changed = True
+            if cover and not already_stamped:
+                rect = doc[0].rect if doc.page_count else fitz.Rect(0, 0, 600, 900)
+                page = doc.new_page(0, width=rect.width, height=rect.height)
+                page.insert_image(page.rect, stream=cover, keep_proportion=True)
+                changed = True
+            if changed:
+                doc.save(tmp, garbage=4, deflate=True)
+        finally:
+            doc.close()
+        if changed:
+            os.replace(tmp, path)  # atomic; breaks hardlink so a seeding torrent is untouched
+        return changed
+    except Exception as exc:
+        log.warning("PDF optimize failed for %s: %s", path.name, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
 def _optimize_with_calibre(path: Path, book, cover_file: Path | None) -> bool:
     exe = shutil.which("ebook-meta")
     if not exe:
@@ -277,6 +334,9 @@ def optimize_ebook(cfg, book, path: Path) -> dict:
         if ext == "epub":
             changed = optimize_epub(path, book, cover, cover_mime or "image/jpeg")
             return {"optimized": changed, "cover": bool(cover), "method": "epub"}
+        if ext == "pdf":
+            changed = optimize_pdf(path, book, cover, cover_mime or "image/jpeg")
+            return {"optimized": changed, "cover": bool(cover) and changed, "method": "pdf"}
         # azw3/mobi/etc → Calibre if available
         cover_file = None
         if cover:

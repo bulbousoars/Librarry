@@ -195,3 +195,83 @@ def test_optimize_epub_writes_iso_language_code(tmp_path):
         opf = ET.fromstring(z.read("OEBPS/content.opf"))
     lang = opf.find(f"{{{OPF_NS}}}metadata").find(f"{{{DC_NS}}}language")
     assert lang.text == "de"
+
+
+def _make_pdf(path, pages=2):
+    import fitz
+    doc = fitz.open()
+    for _ in range(pages):
+        doc.new_page(width=400, height=600)
+    doc.save(str(path))
+    doc.close()
+
+
+def _png_cover():
+    import fitz
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 40, 60))
+    pix.clear_with(180)
+    return pix.tobytes("png")
+
+
+def test_optimize_pdf_prepends_cover_and_sets_metadata(tmp_path):
+    import fitz
+    from librarry.metadata import optimize_pdf
+
+    pdf = tmp_path / "book.pdf"
+    _make_pdf(pdf, pages=2)
+
+    assert optimize_pdf(pdf, _book(), _png_cover()) is True
+
+    doc = fitz.open(pdf)
+    try:
+        assert doc.page_count == 3  # original 2 + prepended cover page
+        assert doc.metadata.get("title") == "The Way of Kings"
+        assert doc.metadata.get("author") == "Brandon Sanderson"
+        # the new first page actually carries an image (the cover)
+        assert doc[0].get_images()
+    finally:
+        doc.close()
+
+
+def test_optimize_pdf_is_idempotent(tmp_path):
+    import fitz
+    from librarry.metadata import optimize_pdf
+
+    pdf = tmp_path / "book.pdf"
+    _make_pdf(pdf, pages=1)
+
+    assert optimize_pdf(pdf, _book(), _png_cover()) is True
+    # Second run must NOT add a second cover page (we stamped it).
+    optimize_pdf(pdf, _book(), _png_cover())
+    doc = fitz.open(pdf)
+    try:
+        assert doc.page_count == 2  # 1 original + exactly 1 cover, not 3
+    finally:
+        doc.close()
+
+
+def test_optimize_pdf_without_cover_still_sets_metadata(tmp_path):
+    import fitz
+    from librarry.metadata import optimize_pdf
+
+    pdf = tmp_path / "book.pdf"
+    _make_pdf(pdf, pages=1)
+    assert optimize_pdf(pdf, _book(), None) is True
+    doc = fitz.open(pdf)
+    try:
+        assert doc.page_count == 1  # no cover page added
+        assert doc.metadata.get("title") == "The Way of Kings"
+    finally:
+        doc.close()
+
+
+def test_optimize_ebook_routes_pdf(tmp_path, monkeypatch):
+    import librarry.metadata as m
+
+    pdf = tmp_path / "book.pdf"
+    _make_pdf(pdf, pages=1)
+    monkeypatch.setattr(m, "fetch_cover_url", lambda *a, **k: (_png_cover(), "image/png"))
+    monkeypatch.setattr(m, "fetch_cover", lambda *a, **k: None)
+    cfg = types.SimpleNamespace(raw={})
+    res = m.optimize_ebook(cfg, _book(cover_url="https://hc/cover.png"), pdf)
+    assert res["method"] == "pdf" and res["optimized"] and res["cover"]
