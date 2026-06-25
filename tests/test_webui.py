@@ -709,6 +709,83 @@ def test_kindle_send_history_records_and_orders():
         assert failed["source"] == "resend"
 
 
+def test_kindle_history_viewable_without_auth():
+    # Single-user / no-auth deployments (auth fronted by a reverse proxy) must
+    # still be able to load the Send-to-Kindle history page.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        app.state.db.log_kindle_send(
+            title="Imported Book", book_id="b1", kindle_to="x@kindle.com",
+            status="sent", source="import",
+        )
+        client = TestClient(app)
+        r = client.get("/api/kindle/history")
+        assert r.status_code == 200
+        assert [s["title"] for s in r.json()["sends"]] == ["Imported Book"]
+
+
+def test_from_address_is_editable_and_supersedes_secret():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        client = TestClient(create_app(str(config)))
+
+        # Starts as a vault secret reference.
+        assert client.get("/api/config").json()["email"]["from_set"] is True
+
+        r = client.post("/api/config/email", json={"from": "sender@dugganco.com"})
+        assert r.status_code == 200
+
+        cfg = client.get("/api/config").json()["email"]
+        assert cfg["from"] == "sender@dugganco.com"
+
+        import yaml as _yaml
+        raw = _yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert raw["kindle"]["from"] == "sender@dugganco.com"  # plain value, secret superseded
+
+
+def test_resend_uses_global_config_without_auth(monkeypatch):
+    import librarry.webui.app as webapp
+
+    sent = {}
+
+    def fake_send(cfg, path, *, title, author, kindle_to=None, send_kindle=None):
+        sent.update({"title": title, "kindle_to": kindle_to, "send_kindle": send_kindle})
+
+    monkeypatch.setattr(webapp, "send_to_kindle", fake_send)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+
+        # No per-user settings, no auth — enable delivery via global config.
+        assert client.post(
+            "/api/config/email", json={"send_kindle": True, "to": "global@kindle.com"}
+        ).status_code == 200
+
+        book_file = root / "library" / "Author" / "Book.epub"
+        book_file.parent.mkdir(parents=True)
+        book_file.write_bytes(b"epub")
+        db = app.state.db
+        bid = db.add_manual("Global Book", "Author")
+        db.mark_imported(bid, str(book_file), "epub")
+
+        r = client.post(f"/api/books/{bid}/resend_kindle")
+        assert r.status_code == 200 and r.json()["sent"] is True
+        assert sent["kindle_to"] == "global@kindle.com" and sent["send_kindle"] is True
+
+        hist = client.get("/api/kindle/history")
+        assert hist.status_code == 200
+        assert any(
+            s["title"] == "Global Book" and s["source"] == "resend"
+            for s in hist.json()["sends"]
+        )
+
+
 def test_book_json_exposes_date_added_and_last_kindle_send():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

@@ -218,6 +218,20 @@ def create_app(config_path: str) -> FastAPI:
             raise HTTPException(403, "admin access required")
         return user
 
+    def _kindle_runtime_settings() -> tuple[str, bool, User | None]:
+        """Kindle delivery settings for the current request.
+
+        Uses the effective user's per-user settings when auth is enabled;
+        otherwise (single-user / no-auth mode) falls back to the global config so
+        Send-to-Kindle still works without a logged-in user.
+        """
+        user = _effective()
+        if user:
+            settings = app.state.users.get_kindle_settings(user.id)
+            return settings.kindle_to, settings.send_kindle, user
+        cfg = app.state.cfg
+        return cfg.kindle_to, cfg.send_kindle, None
+
     @app.middleware("http")
     async def _auth_middleware(request: Request, call_next):
         user_token = None
@@ -582,7 +596,9 @@ def create_app(config_path: str) -> FastAPI:
 
     @app.get("/api/kindle/history")
     def api_kindle_history(limit: int = Query(default=100, le=500)) -> dict[str, Any]:
-        _require_user()
+        # No explicit _require_user(): when auth is enabled the middleware already
+        # gates /api/, and when it's disabled (single-user mode) the history must
+        # still be viewable. _db() resolves to the effective user's DB or default.
         return {"sends": _db().list_kindle_sends(limit=limit)}
 
     @app.get("/api/kindle/settings")
@@ -672,14 +688,11 @@ def create_app(config_path: str) -> FastAPI:
 
     @app.post("/api/books/{book_id:path}/resend_kindle")
     def api_resend_kindle(book_id: str) -> dict[str, Any]:
-        effective = _effective()
-        if not effective:
-            raise HTTPException(401, "authentication required")
-        settings = app.state.users.get_kindle_settings(effective.id)
-        if not settings.send_kindle:
-            raise HTTPException(400, "Send to Kindle is disabled for this user")
-        if not settings.kindle_to:
-            raise HTTPException(400, "Kindle email is not configured for this user")
+        kindle_to, send_kindle, effective = _kindle_runtime_settings()
+        if not send_kindle:
+            raise HTTPException(400, "Send to Kindle is disabled")
+        if not kindle_to:
+            raise HTTPException(400, "Kindle email is not configured")
         book = _db().get(book_id)
         if not book:
             raise HTTPException(404, "book not found")
@@ -694,21 +707,23 @@ def create_app(config_path: str) -> FastAPI:
                 path,
                 title=book.title,
                 author=book.author,
-                kindle_to=settings.kindle_to,
-                send_kindle=settings.send_kindle,
+                kindle_to=kindle_to,
+                send_kindle=send_kindle,
             ) or "sent"
         except Exception as exc:
-            app.state.users.set_kindle_send_status(effective.id, f"failed: {exc}")
+            if effective:
+                app.state.users.set_kindle_send_status(effective.id, f"failed: {exc}")
             _db().log_kindle_send(
                 book_id=book.id, title=book.title, author=book.author,
-                kindle_to=settings.kindle_to or "", status="failed", detail=str(exc), source="resend",
+                kindle_to=kindle_to or "", status="failed", detail=str(exc), source="resend",
             )
             raise HTTPException(500, f"Kindle send failed: {exc}") from exc
-        app.state.users.set_kindle_send_status(effective.id, f"sent: {book.title}")
+        if effective:
+            app.state.users.set_kindle_send_status(effective.id, f"sent: {book.title}")
         if is_loggable_send(status):
             _db().log_kindle_send(
                 book_id=book.id, title=book.title, author=book.author,
-                kindle_to=settings.kindle_to or "", status=status, source="resend",
+                kindle_to=kindle_to or "", status=status, source="resend",
             )
         return {"sent": True, "book_id": book.id}
 
@@ -1185,6 +1200,7 @@ def create_app(config_path: str) -> FastAPI:
                 "smtp_port": kindle.get("smtp_port", 465),
                 "use_ssl": kindle.get("use_ssl", True),
                 "to": kindle.get("to", ""),
+                "from": app.state.cfg.kindle_from,
                 "from_set": _is_set(kindle.get("from")) or _is_set(kindle.get("from_secret")),
                 "user_set": _is_set(kindle.get("user")) or _is_set(kindle.get("user_secret")),
                 "password_set": _is_set(kindle.get("password")) or _is_set(kindle.get("password_secret")),
@@ -1294,6 +1310,11 @@ def create_app(config_path: str) -> FastAPI:
             kindle["use_ssl"] = bool(payload["use_ssl"])
         if "to" in payload:
             kindle["to"] = str(payload["to"]).strip()
+        if "from" in payload:
+            # The from address is a plain (non-secret) email; storing it directly
+            # in config.yaml supersedes any prior secret:/env: reference so it can
+            # be managed from the UI. SMTP user/password stay in the vault.
+            kindle["from"] = str(payload["from"]).strip()
         patch: dict[str, Any] = {"kindle": kindle} if kindle else {}
         if "send_kindle" in payload:
             patch["import"] = {"send_kindle": bool(payload["send_kindle"])}
@@ -2482,13 +2503,15 @@ _PAGE_HTML = """<!DOCTYPE html>
           <div class="field check"><input type="checkbox" id="e_ssl" ${e.use_ssl?'checked':''}>
             <label style="margin:0">Use SSL</label></div>
           <div class="field"><label>Deliver to (Kindle address)</label><input type="text" id="e_to" value="${esc(e.to)}"></div>
+          <div class="field"><label>From address (sender)</label><input type="text" id="e_from" value="${esc(e.from||'')}" placeholder="you@example.com">
+            <div class="hint">The address books are emailed from. Must be an authorized sender on your Kindle account and accepted by the SMTP server.</div>
+          </div>
           <div class="field"><label>Credentials (managed in encrypted vault)</label>
             <div class="kv">
-              <div>From address</div><div>${sec(e.from_set)}</div>
               <div>SMTP user</div><div>${sec(e.user_set)}</div>
               <div>SMTP password</div><div>${sec(e.password_set)}</div>
             </div>
-            <div class="hint">Set secrets with: <code>librarry secrets set kindle_smtp_from|kindle_smtp_user|kindle_smtp_password</code></div>
+            <div class="hint">Set secrets with: <code>librarry secrets set kindle_smtp_user|kindle_smtp_password</code></div>
           </div>
           <button class="primary" onclick="VIEWS.saveEmail()">Save</button>
         </div>
@@ -2536,6 +2559,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           smtp_port: Number(document.getElementById('e_port').value),
           use_ssl: document.getElementById('e_ssl').checked,
           to: document.getElementById('e_to').value,
+          from: document.getElementById('e_from').value,
         });
         toast('Email settings saved');
       } catch (err) { toast('Save failed: ' + err.message); }
