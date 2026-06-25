@@ -17,6 +17,8 @@ class TorrentInfo:
     progress: float
     save_path: str
     category: str
+    dlspeed: int = 0  # bytes/sec
+    eta: int = 0  # seconds (8640000 == unknown/infinite in qBittorrent)
 
 
 class QBittorrentClient:
@@ -92,6 +94,8 @@ class QBittorrentClient:
                     progress=float(item.get("progress", 0) or 0),
                     save_path=str(item.get("save_path", "")),
                     category=str(item.get("category", "")),
+                    dlspeed=int(item.get("dlspeed", 0) or 0),
+                    eta=int(item.get("eta", 0) or 0),
                 )
             )
         return out

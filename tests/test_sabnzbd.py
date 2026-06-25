@@ -90,3 +90,21 @@ def test_add_url_raises_when_addfile_reports_failure():
     with pytest.raises(RuntimeError) as exc:
         client.add_url("https://indexer/api?t=get&id=x", "Book", "books")
     assert "addfile" in str(exc.value)
+
+
+def test_queue_parses_inprogress_items():
+    queue_json = {"queue": {"slots": [
+        {"nzo_id": "SABnzbd_nzo_x", "filename": "Some.Book.epub", "status": "Downloading",
+         "percentage": "42", "mb": "100.0", "mbleft": "58.0", "timeleft": "0:03:21"},
+    ]}}
+    session = _FakeSession(_Resp(json_data=queue_json), _Resp())
+    client = SabnzbdClient(_cfg(), session=session)
+
+    item = client.get_queue_item("SABnzbd_nzo_x")
+    assert item is not None
+    assert item.percentage == 42.0
+    assert item.mb_left == 58.0 and item.mb == 100.0
+    assert item.timeleft == "0:03:21"
+    assert client.get_queue_item("missing") is None
+    # the call used mode=queue
+    assert session.get_calls[0]["params"]["mode"] == "queue"

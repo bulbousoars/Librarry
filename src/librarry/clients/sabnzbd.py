@@ -18,6 +18,17 @@ class SabHistoryItem:
     bytes: int
 
 
+@dataclass
+class SabQueueItem:
+    nzo_id: str
+    name: str
+    status: str
+    percentage: float
+    mb: float
+    mb_left: float
+    timeleft: str  # e.g. "0:12:34"
+
+
 class SabnzbdClient:
     def __init__(self, config: SabnzbdConfig, session: requests.Session | None = None):
         self.config = config
@@ -109,6 +120,31 @@ class SabnzbdClient:
 
     def get_history_item(self, nzo_id: str) -> SabHistoryItem | None:
         for item in self.history(limit=200):
+            if item.nzo_id == nzo_id:
+                return item
+        return None
+
+    def queue(self) -> list[SabQueueItem]:
+        """In-progress (downloading/queued) items, for progress reporting."""
+        data = self._call("queue")
+        slots = data.get("queue", {}).get("slots", [])
+        out: list[SabQueueItem] = []
+        for slot in slots:
+            out.append(
+                SabQueueItem(
+                    nzo_id=str(slot.get("nzo_id", "")),
+                    name=str(slot.get("filename") or slot.get("name", "")),
+                    status=str(slot.get("status", "")),
+                    percentage=float(slot.get("percentage", 0) or 0),
+                    mb=float(slot.get("mb", 0) or 0),
+                    mb_left=float(slot.get("mbleft", 0) or 0),
+                    timeleft=str(slot.get("timeleft", "")),
+                )
+            )
+        return out
+
+    def get_queue_item(self, nzo_id: str) -> SabQueueItem | None:
+        for item in self.queue():
             if item.nzo_id == nzo_id:
                 return item
         return None

@@ -16,6 +16,24 @@ def _norm_token(s: str) -> list[str]:
     return [t for t in re.sub(r"[^a-z0-9]+", " ", s.lower()).split() if len(t) > 2]
 
 
+def _human_speed(bps: float) -> str:
+    bps = float(bps or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if bps < 1024:
+            return f"{bps:.0f} {unit}/s"
+        bps /= 1024
+    return f"{bps:.0f} TB/s"
+
+
+def _human_eta(secs: int) -> str:
+    secs = int(secs or 0)
+    if secs <= 0 or secs >= 8640000:  # qBittorrent uses 8640000 for unknown
+        return "?"
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def _resolve_sab_path(cfg: AppConfig, storage: str) -> Path | None:
     if not storage:
         return None
@@ -81,13 +99,27 @@ def poll_downloads(cfg: AppConfig, db: Database) -> dict[str, int]:
                     log.info("SAB complete: %s -> %s", book.title, path)
                     ready += 1
                 else:
+                    qi = sab.get_queue_item(book.download_id) if book.download_id else None
+                    if qi:
+                        log.info(
+                            "Downloading (SAB) %r — %.0f%% (%.0f/%.0f MB left, ETA %s)",
+                            book.title, qi.percentage, qi.mb_left, qi.mb, qi.timeleft or "?",
+                        )
+                    else:
+                        log.info("Waiting (SAB) %r — not yet visible in queue/history", book.title)
                     waiting += 1
             elif book.protocol == "torrent" and qbit:
                 torrent = qbit.find_by_name(book.release_title or book.title)
                 if not torrent:
+                    log.info("Waiting (qBit) %r — torrent not found yet", book.title)
                     waiting += 1
                     continue
                 if not qbit.is_complete(torrent):
+                    log.info(
+                        "Downloading (qBit) %r — %.0f%% @ %s, ETA %s [%s]",
+                        book.title, torrent.progress * 100, _human_speed(torrent.dlspeed),
+                        _human_eta(torrent.eta), torrent.state,
+                    )
                     waiting += 1
                     continue
                 content = Path(torrent.save_path) / torrent.name
