@@ -709,6 +709,44 @@ def test_kindle_send_history_records_and_orders():
         assert failed["source"] == "resend"
 
 
+def test_book_json_exposes_date_added_and_last_kindle_send():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+        db = app.state.db
+
+        bid = client.post(
+            "/api/books/add", json={"title": "Neuromancer", "author": "William Gibson"}
+        ).json()["id"]
+
+        # date_added mirrors the book's wanted_at (when it entered the library).
+        book = db.get(bid)
+        listed = next(b for b in client.get("/api/books").json() if b["id"] == bid)
+        assert listed["date_added"] == book.wanted_at
+        assert listed["last_kindle_send"] is None  # nothing sent yet
+
+        # Only successful sends count, and the most recent one wins.
+        db.log_kindle_send(title="Neuromancer", book_id=bid, status="failed", source="resend")
+        db.log_kindle_send(
+            title="Neuromancer", book_id=bid, status="sent",
+            kindle_to="x@kindle.com", source="import",
+        )
+        first_sent = db.last_kindle_send(bid)
+        assert first_sent
+        db.log_kindle_send(title="Neuromancer", book_id=bid, status="sent", source="resend")
+        latest = db.last_kindle_send(bid)
+        assert latest >= first_sent
+
+        # Both the list and detail endpoints surface the latest successful send.
+        listed = next(b for b in client.get("/api/books").json() if b["id"] == bid)
+        assert listed["last_kindle_send"] == latest
+        detail = client.get("/api/books/" + bid).json()
+        assert detail["last_kindle_send"] == latest
+        assert detail["date_added"] == book.wanted_at
+
+
 def _write_config(root: Path) -> Path:
     db_path = root / "test.db"
     config = root / "config.yaml"

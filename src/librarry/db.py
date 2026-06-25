@@ -571,6 +571,28 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def last_kindle_send(self, book_id: str) -> str | None:
+        """Timestamp of the most recent *successful* Send-to-Kindle for a book."""
+        with self.connect(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT MAX(created_at) AS last FROM kindle_sends "
+                "WHERE status='sent' AND book_id=?",
+                (book_id,),
+            ).fetchone()
+        return row["last"] if row and row["last"] else None
+
+    def last_kindle_send_map(self) -> dict[str, str]:
+        """Map of book_id -> most recent successful Send-to-Kindle timestamp.
+
+        Bulk variant of ``last_kindle_send`` for list views (avoids N+1 queries).
+        """
+        with self.connect(readonly=True) as conn:
+            rows = conn.execute(
+                "SELECT book_id, MAX(created_at) AS last FROM kindle_sends "
+                "WHERE status='sent' AND book_id IS NOT NULL GROUP BY book_id"
+            ).fetchall()
+        return {r["book_id"]: r["last"] for r in rows}
+
     def get_author_bibliography_item(self, author: str, title: str) -> dict | None:
         with self.connect(readonly=True) as conn:
             row = conn.execute(

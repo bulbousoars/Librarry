@@ -317,7 +317,7 @@ def create_app(config_path: str) -> FastAPI:
             slug = _url_slug(b.title)
         return f"https://hardcover.app/books/{slug}" if slug else ""
 
-    def _book_json(b) -> dict[str, Any]:
+    def _book_json(b, kindle_map: dict[str, str] | None = None) -> dict[str, Any]:
         data = asdict(b)
         extras = _db().get_book_extras(b.id)
         stage, detail = _book_progress(b)
@@ -329,6 +329,13 @@ def create_app(config_path: str) -> FastAPI:
         data["tags"] = extras.get("tags") or ""
         data["cover_override_url"] = extras.get("cover_override_url") or ""
         data["cover_display_url"] = data["cover_override_url"] or b.cover_url
+        # Date the book entered the library (first wanted/discovered).
+        data["date_added"] = b.wanted_at
+        # Most recent successful Send-to-Kindle, if any. Use the precomputed map
+        # for list views; fall back to a single lookup for detail views.
+        data["last_kindle_send"] = (
+            kindle_map.get(b.id) if kindle_map is not None else _db().last_kindle_send(b.id)
+        )
         return data
 
     def _int_or_none(value: Any) -> int | None:
@@ -651,7 +658,8 @@ def create_app(config_path: str) -> FastAPI:
             books = db.list_by_status(status)[:limit]
         else:
             books = db.list_all(limit=limit)
-        return [_book_json(b) for b in books]
+        kindle_map = db.last_kindle_send_map()
+        return [_book_json(b, kindle_map) for b in books]
 
     @app.post("/api/books/add")
     def api_add_book(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -828,7 +836,7 @@ def create_app(config_path: str) -> FastAPI:
     @app.get("/api/authors/{author:path}")
     def api_author_detail(author: str) -> dict[str, Any]:
         profile = _db().get_author_profile(author)
-        books = [_book_json(b) for b in _db().list_by_author(author)]
+        books = [_book_json(b, _db().last_kindle_send_map()) for b in _db().list_by_author(author)]
         bibliography = _bibliography_json(author, _db().list_author_bibliography(author))
         return {**profile, "books": books, "bibliography": bibliography}
 
@@ -847,7 +855,7 @@ def create_app(config_path: str) -> FastAPI:
             source_url=current.get("source_url", ""),
             hardcover_url=current.get("hardcover_url", ""),
         )
-        books = [_book_json(b) for b in _db().list_by_author(author)]
+        books = [_book_json(b, _db().last_kindle_send_map()) for b in _db().list_by_author(author)]
         bibliography = _bibliography_json(author, _db().list_author_bibliography(author))
         return {**profile, "books": books, "bibliography": bibliography}
 
@@ -1891,6 +1899,8 @@ _PAGE_HTML = """<!DOCTYPE html>
       { key:'library_path', label:'Filepath', def:false, get:b=>b.library_path||'',
         cell:b=>`<span class="muted">${esc(b.library_path||'')}</span>` },
       { key:'source', label:'Source', def:false, get:b=>b.source||b.indexer||'' },
+      { key:'date_added', label:'Added', def:true, get:b=>(b.date_added||b.wanted_at||'').slice(0,10) },
+      { key:'last_kindle_send', label:'Sent to Kindle', def:true, get:b=>(b.last_kindle_send||'').replace('T',' ').slice(0,19) },
       { key:'updated_at', label:'Updated', def:false, get:b=>(b.updated_at||'').replace('T',' ').slice(0,19) },
     ];
 
@@ -2047,6 +2057,8 @@ _PAGE_HTML = """<!DOCTYPE html>
                 <div>Rating</div><div>${b.rating!=null ? esc(Number(b.rating).toFixed(2)) : ''}</div>
                 <div>Released</div><div>${esc(b.release_date || b.release_year || '')}</div>
                 <div>Genres</div><div>${esc(b.genres||'')}</div>
+                <div>Added</div><div>${esc((b.date_added||b.wanted_at||'').slice(0,10))}</div>
+                <div>Sent to Kindle</div><div>${b.last_kindle_send ? esc(b.last_kindle_send.replace('T',' ').slice(0,19)) : '<span class="muted">Never</span>'}</div>
               </div>
               ${b.status === 'imported' && b.library_path ? `<div class="toolbar" style="margin-top:1rem">
                 <button class="primary" onclick="VIEWS.resendKindle('${esc(b.id)}')">Re-send to Kindle</button>
