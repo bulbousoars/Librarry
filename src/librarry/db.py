@@ -700,7 +700,7 @@ class Database:
     ) -> None:
         now = utcnow()
         with self.connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE books SET
                     status='snatched',
@@ -717,6 +717,10 @@ class Database:
                 """,
                 (protocol, source, indexer, release_title, download_id, file_format, now, now, book_id),
             )
+            # If the book row is gone (e.g. removed mid-download) the history
+            # INSERT would otherwise fail an opaque FK error and crash the run.
+            if cur.rowcount == 0:
+                raise ValueError(f"cannot snatch unknown book {book_id!r}")
             conn.execute(
                 """
                 INSERT INTO download_history

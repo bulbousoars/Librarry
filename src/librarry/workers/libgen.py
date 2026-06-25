@@ -311,7 +311,7 @@ def fetch_libgen(cfg: AppConfig, db: Database) -> dict[str, int]:
         log.error("No working LibGen host")
         return {"fetched": 0, "missed": 0}
 
-    got = missed = 0
+    got = missed = failed = 0
     download_root = cfg.download_dir / cfg.download_subdir
     download_root.mkdir(parents=True, exist_ok=True)
 
@@ -321,41 +321,51 @@ def fetch_libgen(cfg: AppConfig, db: Database) -> dict[str, int]:
         last = state.get(book.id, 0)
         if now - last < requeue:
             continue
-        log.info("LibGen: %r by %r", book.title, book.author)
-        hit = _search(book.author, book.title, isbns=[book.isbn_13, book.isbn_10])
-        if not hit:
+        # Isolate each book: one failure (network, bad file, a vanished book row,
+        # etc.) must never abort the whole pipeline — `import` runs after libgen,
+        # so an unhandled error here would silently strand completed downloads.
+        try:
+            log.info("LibGen: %r by %r", book.title, book.author)
+            hit = _search(book.author, book.title, isbns=[book.isbn_13, book.isbn_10])
+            if not hit:
+                state[book.id] = now
+                missed += 1
+                continue
+            md5, ext, host = hit
+            data = _download(host, md5)
+            if not data:
+                state[book.id] = now
+                missed += 1
+                continue
+            name = _safe_name(book.author, book.title)
+            folder = download_root / name
+            folder.mkdir(parents=True, exist_ok=True)
+            dest = folder / f"{name}.{ext}"
+            dest.write_bytes(data)
+            if hasattr(os, "chown"):
+                for p in (folder, dest):
+                    try:
+                        os.chown(p, 1000, 1000)
+                    except (PermissionError, OSError):
+                        pass
+            db.mark_snatched(
+                book.id,
+                protocol="direct",
+                source="libgen",
+                indexer="libgen",
+                release_title=name,
+                download_id=name,
+                file_format=ext,
+            )
+            db.set_download_path(book.id, str(folder))
             state[book.id] = now
-            missed += 1
-            continue
-        md5, ext, host = hit
-        data = _download(host, md5)
-        if not data:
+            got += 1
+            time.sleep(3)
+        except Exception as exc:
+            # Back off this book so it doesn't re-fail on every run.
             state[book.id] = now
-            missed += 1
-            continue
-        name = _safe_name(book.author, book.title)
-        folder = download_root / name
-        folder.mkdir(parents=True, exist_ok=True)
-        dest = folder / f"{name}.{ext}"
-        dest.write_bytes(data)
-        for p in (folder, dest):
-            try:
-                os.chown(p, 1000, 1000)
-            except (PermissionError, OSError):
-                pass
-        db.mark_snatched(
-            book.id,
-            protocol="direct",
-            source="libgen",
-            indexer="libgen",
-            release_title=name,
-            download_id=name,
-            file_format=ext,
-        )
-        db.set_download_path(book.id, str(folder))
-        state[book.id] = now
-        got += 1
-        time.sleep(3)
+            failed += 1
+            log.error("LibGen failed for %r (%s): %s", book.title, book.id, exc)
 
     state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    return {"fetched": got, "missed": missed}
+    return {"fetched": got, "missed": missed, "failed": failed}

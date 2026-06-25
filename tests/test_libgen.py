@@ -64,3 +64,58 @@ def test_parse_size():
     assert lg._parse_size("foo 3 MB epub") == 3 * 1024 * 1024
     assert lg._parse_size("700 KB") == 700 * 1024
     assert lg._parse_size("no size here") is None
+
+
+def test_mark_snatched_unknown_book_raises_not_fk_crash(tmp_path):
+    from librarry.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    try:
+        db.mark_snatched("ghost", protocol="direct", source="libgen",
+                         indexer="libgen", release_title="x", download_id="x", file_format="epub")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "ghost" in str(exc)
+    # no orphan history row was written
+    with db.connect(readonly=True) as c:
+        assert c.execute("SELECT COUNT(*) FROM download_history").fetchone()[0] == 0
+
+
+def test_fetch_libgen_isolates_per_book_failures(tmp_path, monkeypatch):
+    import types
+    from librarry.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.add_manual("Book One", "Author A")
+    db.add_manual("Book Two", "Author B")
+
+    cfg = types.SimpleNamespace(
+        libgen_enabled=True,
+        state_dir=tmp_path / "state",
+        libgen_requeue_after_hours=0,
+        libgen_max_per_run=10,
+        download_dir=tmp_path / "dl",
+        download_subdir="books",
+    )
+
+    monkeypatch.setattr(lg, "get_host", lambda ttl=600: "libgen.vg")
+    monkeypatch.setattr(lg, "_search", lambda author, title, isbns=None: (MD5, "epub", "libgen.vg"))
+
+    state = {"first": True}
+
+    def fake_download(host, md5):
+        if state["first"]:
+            state["first"] = False
+            raise RuntimeError("boom on the first book")
+        return b"epub-bytes"
+
+    monkeypatch.setattr(lg, "_download", fake_download)
+
+    # Must not raise despite the first book failing.
+    out = lg.fetch_libgen(cfg, db)
+    assert out["failed"] == 1
+    assert out["fetched"] == 1
+    # The healthy book still got snatched (pipeline not aborted).
+    assert len(db.list_by_status("snatched")) == 1
