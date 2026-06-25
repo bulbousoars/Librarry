@@ -109,6 +109,35 @@ def scan_library(cfg: AppConfig, db: Database, *, title_threshold: float = 0.85)
     return {"matched": matched, "backfilled": backfilled, "library_files": len(index)}
 
 
+def reoptimize_library(cfg: AppConfig, db: Database) -> dict[str, int]:
+    """Re-embed cover + metadata into every imported book's file.
+
+    Backfills files that were never optimized (e.g. matched by scan_library) and
+    refreshes covers/metadata for the rest. Best-effort per book.
+    """
+    done = skipped = failed = 0
+    for book in db.list_by_status("imported"):
+        path = Path(book.library_path) if book.library_path else None
+        if not path or not path.is_file():
+            skipped += 1
+            continue
+        try:
+            result = optimize_ebook(cfg, book, path)
+            if result.get("optimized"):
+                done += 1
+                try:
+                    db.set_size(book.id, path.stat().st_size)
+                except OSError:
+                    pass
+            else:
+                skipped += 1
+        except Exception as exc:
+            log.warning("Re-optimize failed for %r: %s", book.title, exc)
+            failed += 1
+    log.info("Re-optimize complete: %d updated, %d skipped, %d failed", done, skipped, failed)
+    return {"reoptimized": done, "skipped": skipped, "failed": failed}
+
+
 def import_ready(cfg: AppConfig, db: Database, *, kindle_settings=None) -> dict[str, int]:
     imported = skipped = failed = 0
     for book in db.list_by_status("snatched"):

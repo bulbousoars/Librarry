@@ -13,7 +13,7 @@ from librarry.config import load_config
 from librarry.db import Database
 from librarry.users import UserStore
 from librarry.vault import SecretsVault, VaultError
-from librarry.workers.check import REQUIRED_SECRETS, run_checks
+from librarry.workers.check import REQUIRED_SECRETS, record_run, run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
 from librarry.workers.import_book import import_ready, scan_library
 from librarry.workers.libgen import fetch_libgen
@@ -295,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         print("poll", poll_downloads(cfg, db))
         print("libgen", fetch_libgen(cfg, db))
         print("import", import_ready(cfg, db))
+        record_run(cfg)
     elif args.command == "status":
         counts = db.counts()
         for status in ("wanted", "snatched", "imported", "failed"):

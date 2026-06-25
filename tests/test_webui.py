@@ -838,6 +838,45 @@ def test_replace_file_swaps_reimports_and_removes_old():
         assert not oldfile.exists()
 
 
+def test_refresh_metadata_embeds_and_reoptimize_action():
+    import zipfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+        db = app.state.db
+
+        bid = db.add_manual("Some Book", "Some Author")
+        f = root / "library" / "Some Author" / "Some Book.epub"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(_minimal_epub_bytes())
+        db.mark_imported(bid, str(f), "epub")
+
+        # Per-book refresh re-embeds the title into the EPUB OPF.
+        r = client.post(f"/api/books/{bid}/refresh_metadata")
+        assert r.status_code == 200
+        with zipfile.ZipFile(f) as z:
+            opf = z.read("OEBPS/content.opf").decode()
+        assert "Some Book" in opf
+
+        # Library-wide backfill task runs and reports at least one updated.
+        r2 = client.post("/api/actions/reoptimize")
+        assert r2.status_code == 200
+        assert r2.json()["result"]["reoptimized"] >= 1
+
+
+def test_refresh_metadata_missing_file_errors():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+        bid = app.state.db.add_manual("No File", "Author")  # wanted, no library_path
+        r = client.post(f"/api/books/{bid}/refresh_metadata")
+        assert r.status_code == 400
+
+
 def test_replace_file_rejects_unsupported_type():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

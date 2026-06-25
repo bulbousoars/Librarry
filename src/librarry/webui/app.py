@@ -26,10 +26,16 @@ from librarry.config import AppConfig, load_config
 from librarry.db import Database
 from librarry.kindle import is_loggable_send, send_to_kindle
 from librarry.users import User, UserStore
-from librarry.workers.check import run_checks
+from librarry.workers.check import record_run, run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
 from librarry.metadata import optimize_ebook
-from librarry.workers.import_book import EBOOK_EXTS, _safe_name, import_ready, scan_library
+from librarry.workers.import_book import (
+    EBOOK_EXTS,
+    _safe_name,
+    import_ready,
+    reoptimize_library,
+    scan_library,
+)
 from librarry.workers import annas as annas_worker
 from librarry.workers import libgen as libgen_worker
 from librarry.workers.libgen import fetch_libgen
@@ -45,6 +51,7 @@ _ACTIONS = {
     "poll": poll_downloads,
     "libgen": fetch_libgen,
     "import": import_ready,
+    "reoptimize": reoptimize_library,
 }
 
 _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar("librarry_user", default=None)
@@ -787,6 +794,29 @@ def create_app(config_path: str) -> FastAPI:
             pass
         return _book_json(_db().get(book.id))
 
+    @app.post("/api/books/{book_id:path}/refresh_metadata")
+    def api_refresh_metadata(book_id: str) -> dict[str, Any]:
+        """Re-embed cover + metadata into an already-imported book's file (e.g. a
+        scan-matched file that never got optimized)."""
+        book = _db().get(book_id)
+        if not book:
+            raise HTTPException(404, "book not found")
+        if not book.library_path:
+            raise HTTPException(400, "book has no library file")
+        path = Path(book.library_path)
+        if not path.is_file():
+            raise HTTPException(404, "library file not found on disk")
+        try:
+            result = optimize_ebook(app.state.cfg, book, path)
+        except Exception as exc:
+            raise HTTPException(500, f"metadata refresh failed: {exc}") from exc
+        try:
+            _db().set_size(book.id, path.stat().st_size)
+        except OSError:
+            pass
+        log.info("Refreshed metadata for %r: %s", book.title, result)
+        return _book_json(_db().get(book.id))
+
     @app.get("/api/books/{book_id:path}")
     def api_book_detail(book_id: str) -> dict[str, Any]:
         book = _db().get(book_id)
@@ -1198,7 +1228,7 @@ def create_app(config_path: str) -> FastAPI:
     @app.get("/api/check")
     @app.get("/api/health")
     def api_check() -> dict[str, Any]:
-        result = run_checks(_reload_cfg())
+        result = run_checks(_reload_cfg(), _db())
         return {
             "ok": result.ok,
             "warn": result.warn,
@@ -1217,6 +1247,7 @@ def create_app(config_path: str) -> FastAPI:
             {"name": "poll", "label": "Poll downloads", "desc": "Check SAB/qBit for completed grabs"},
             {"name": "libgen", "label": "LibGen fallback", "desc": "Fetch still-wanted books from LibGen"},
             {"name": "import", "label": "Import", "desc": "Move completed downloads to library"},
+            {"name": "reoptimize", "label": "Refresh metadata", "desc": "Re-embed cover + metadata into all imported books (backfills scan-matched files)"},
             {"name": "run", "label": "Run full pipeline", "desc": "sync → search → poll → libgen → import"},
             {"name": "retry", "label": "Retry failed", "desc": "Reset failed books to wanted"},
         ]
@@ -1237,6 +1268,7 @@ def create_app(config_path: str) -> FastAPI:
                 "libgen": fetch_libgen(cfg, db),
                 "import": import_ready(cfg, db, kindle_settings=kindle_settings),
             }
+            record_run(cfg)
             app.state.last_action = {"action": "run", "result": result, "at": _now()}
             return JSONResponse({"action": "run", "result": result})
         if name == "retry":
@@ -2180,6 +2212,7 @@ _PAGE_HTML = """<!DOCTYPE html>
               </div>
               ${b.status === 'imported' && b.library_path ? `<div class="toolbar" style="margin-top:1rem">
                 <button class="primary" onclick="VIEWS.resendKindle('${esc(b.id)}')">Re-send to Kindle</button>
+                <button onclick="VIEWS.refreshMetadata('${esc(b.id)}')" title="Re-embed the Hardcover cover and metadata into the file">Refresh metadata &amp; cover</button>
               </div>` : ''}
             </div>
           </div>
@@ -2219,6 +2252,17 @@ _PAGE_HTML = """<!DOCTYPE html>
         await VIEWS.book(id);
       } catch (err) {
         toast('Kindle send failed: ' + err.message);
+      }
+    };
+
+    VIEWS.refreshMetadata = async (id) => {
+      try {
+        toast('Refreshing metadata & cover…');
+        await jpost('/api/books/' + encodeURIComponent(id) + '/refresh_metadata', {});
+        toast('Metadata & cover refreshed');
+        await VIEWS.book(id);
+      } catch (err) {
+        toast('Refresh failed: ' + err.message);
       }
     };
 
