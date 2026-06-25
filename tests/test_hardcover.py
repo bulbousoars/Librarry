@@ -58,6 +58,50 @@ class _Cfg:
     hardcover_min_interval_seconds = 0.0
 
 
+def test_add_to_status_returns_user_book_id(monkeypatch):
+    captured = {}
+
+    def fake_request(cfg, query, variables=None, *, block=True, timeout=30):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"data": {"insert_user_book": {"id": 4242, "error": None, "user_book": {"id": 4242}}}}
+
+    monkeypatch.setattr(hc, "request", fake_request)
+    ub_id = hc.add_to_status(_Cfg(), "12345", status_id=1)
+    assert ub_id == "4242"
+    assert captured["variables"] == {"book_id": 12345, "status_id": 1}
+    assert "insert_user_book" in captured["query"]
+
+
+def test_add_to_status_raises_on_graphql_errors(monkeypatch):
+    monkeypatch.setattr(hc, "request", lambda *a, **k: {"errors": [{"message": "nope"}]})
+    try:
+        hc.add_to_status(_Cfg(), "1")
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "nope" in str(exc)
+
+
+def test_add_to_status_raises_on_payload_error(monkeypatch):
+    monkeypatch.setattr(
+        hc, "request",
+        lambda *a, **k: {"data": {"insert_user_book": {"id": None, "error": "already exists", "user_book": None}}},
+    )
+    try:
+        hc.add_to_status(_Cfg(), "1")
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "already exists" in str(exc)
+
+
+def test_add_to_status_rejects_non_numeric_id():
+    try:
+        hc.add_to_status(_Cfg(), "not-an-int")
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "invalid" in str(exc).lower()
+
+
 def test_find_author_profile_url_exact_match(monkeypatch):
     def fake_request(cfg, query, variables=None, *, block=True, timeout=30):
         return {"data": {"authors": [

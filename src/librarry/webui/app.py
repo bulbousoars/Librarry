@@ -5,6 +5,7 @@ import contextvars
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 from dataclasses import asdict
@@ -32,6 +33,8 @@ from librarry.workers import libgen as libgen_worker
 from librarry.workers.libgen import fetch_libgen
 from librarry.workers.poll import poll_downloads
 from librarry.workers.search import search_book, search_releases, search_wanted, snatch_release
+
+log = logging.getLogger(__name__)
 
 _ACTIONS = {
     "sync": sync_hardcover,
@@ -1014,7 +1017,26 @@ def create_app(config_path: str) -> FastAPI:
             if payload.get("cover") and "cover_url" not in meta:
                 meta["cover_url"] = payload.get("cover")
             _db().set_metadata(book_id, {k: v for k, v in meta.items() if v is not None})
-        return {"added": True, "id": book_id, "title": title, "author": author or "Unknown"}
+        result = {"added": True, "id": book_id, "title": title, "author": author or "Unknown"}
+        # Push the book onto the user's Hardcover shelf as "Want to Read" so the
+        # add is reflected upstream (mirrors the Hardcover→librarry sync). Best
+        # effort: a failure never blocks the local add, but is reported.
+        cfg = app.state.cfg
+        push = (cfg.raw or {}).get("hardcover", {}).get("push_want_to_read", True)
+        if push and cfg.hardcover_token:
+            try:
+                ub_id = hardcover.add_to_status(cfg, hc_id, status_id=cfg.hardcover_want_status_id)
+                _db().set_hardcover_user_book_id(book_id, ub_id)
+                result["hardcover_want"] = True
+            except Exception as exc:
+                log.warning("Could not add %r to Hardcover Want-to-Read: %s", title, exc)
+                result["hardcover_want"] = False
+                result["hardcover_error"] = str(exc)
+        else:
+            result["hardcover_want"] = False
+            if push and not cfg.hardcover_token:
+                result["hardcover_error"] = "Hardcover token not configured"
+        return result
 
     @app.get("/api/lookup")
     def api_lookup(q: str = Query(..., min_length=2)) -> dict[str, Any]:
@@ -2443,8 +2465,12 @@ _PAGE_HTML = """<!DOCTYPE html>
     };
     VIEWS.addFromHardcover = async (i) => {
       const r = (window._hc || [])[i]; if (!r) return;
-      try { await jpost('/api/books/add_hardcover', { id: r.id, title: r.title, author: r.author, slug: r.slug, cover: r.cover, meta: r.meta });
-        toast('Added (with metadata): ' + r.title); }
+      try {
+        const res = await jpost('/api/books/add_hardcover', { id: r.id, title: r.title, author: r.author, slug: r.slug, cover: r.cover, meta: r.meta });
+        if (res.hardcover_want) toast('Added + marked Want to Read on Hardcover: ' + r.title);
+        else if (res.hardcover_error) toast('Added: ' + r.title + ' (Hardcover not updated: ' + res.hardcover_error + ')');
+        else toast('Added (with metadata): ' + r.title);
+      }
       catch (err) { toast('Add failed: ' + err.message); }
     };
     VIEWS.lookup = async () => {

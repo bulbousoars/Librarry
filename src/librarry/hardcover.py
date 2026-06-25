@@ -96,6 +96,46 @@ def request(cfg, query: str, variables: dict | None = None, *, block: bool = Tru
     return resp.json()
 
 
+_INSERT_USER_BOOK = """
+mutation($book_id: Int!, $status_id: Int!) {
+  insert_user_book(object: {book_id: $book_id, status_id: $status_id}) {
+    id
+    error
+    user_book { id }
+  }
+}
+"""
+
+
+def add_to_status(cfg, hardcover_book_id, *, status_id: int = 1, block: bool = True, timeout: int = 20) -> str:
+    """Add a Hardcover book to the user's shelf at the given status.
+
+    status_id 1 = "Want to Read" (Hardcover's default). Returns the created
+    user_book id as a string. Raises RuntimeError on a GraphQL/API error so the
+    caller can decide how to surface it.
+    """
+    try:
+        book_id = int(str(hardcover_book_id).strip())
+    except (TypeError, ValueError):
+        raise RuntimeError(f"invalid Hardcover book id: {hardcover_book_id!r}")
+    body = request(
+        cfg, _INSERT_USER_BOOK,
+        {"book_id": book_id, "status_id": int(status_id)},
+        block=block, timeout=timeout,
+    )
+    if not isinstance(body, dict) or body.get("errors"):
+        errs = body.get("errors") if isinstance(body, dict) else body
+        raise RuntimeError(f"Hardcover insert_user_book failed: {errs}")
+    payload = (body.get("data") or {}).get("insert_user_book") or {}
+    if payload.get("error"):
+        raise RuntimeError(f"Hardcover insert_user_book error: {payload['error']}")
+    ub = payload.get("user_book") or {}
+    ub_id = payload.get("id") or ub.get("id")
+    if not ub_id:
+        raise RuntimeError("Hardcover insert_user_book returned no user_book id")
+    return str(ub_id)
+
+
 _AUTHOR_QUERY = (
     "query($name:String!){ authors(where:{name:{_ilike:$name}}, limit:5)"
     "{ name slug books_count } }"

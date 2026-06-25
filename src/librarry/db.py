@@ -322,6 +322,15 @@ class Database:
             )
         return book_id
 
+    def set_hardcover_user_book_id(self, book_id: str, hardcover_user_book_id: str) -> None:
+        """Link a local book to its Hardcover user_book row (set after pushing a
+        Want-to-Read), so a later sync reconciles instead of duplicating."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE books SET hardcover_user_book_id=?, updated_at=? WHERE id=?",
+                (str(hardcover_user_book_id), utcnow(), str(book_id)),
+            )
+
     def set_metadata(self, book_id: str, meta: dict) -> int:
         """Update metadata columns for a book (only known fields, skips None)."""
         cols = [(k, v) for k, v in meta.items() if k in _METADATA_FIELDS and v is not None]

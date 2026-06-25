@@ -822,6 +822,72 @@ def test_resend_uses_global_config_without_auth(monkeypatch):
         )
 
 
+def test_add_hardcover_pushes_want_to_read(monkeypatch):
+    import librarry.webui.app as webapp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        app.state.cfg.hardcover_token = "tok"  # enable the upstream push
+
+        calls = {}
+
+        def fake_add(cfg, hc_id, *, status_id=1, **kw):
+            calls["hc_id"] = hc_id
+            calls["status_id"] = status_id
+            return "999"
+
+        monkeypatch.setattr(webapp.hardcover, "add_to_status", fake_add)
+        client = TestClient(app)
+
+        r = client.post(
+            "/api/books/add_hardcover",
+            json={"id": "12345", "title": "Dune", "author": "Frank Herbert"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["added"] is True and body["hardcover_want"] is True
+        assert calls == {"hc_id": "12345", "status_id": 1}
+        # The returned user_book id is linked to the local row.
+        assert app.state.db.get(body["id"]).hardcover_user_book_id == "999"
+
+
+def test_add_hardcover_push_failure_does_not_block_add(monkeypatch):
+    import librarry.webui.app as webapp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        app.state.cfg.hardcover_token = "tok"
+
+        def boom(cfg, hc_id, **kw):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(webapp.hardcover, "add_to_status", boom)
+        client = TestClient(app)
+
+        r = client.post("/api/books/add_hardcover", json={"id": "777", "title": "X", "author": "Y"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["added"] is True and body["hardcover_want"] is False
+        assert "api down" in body["hardcover_error"]
+        assert app.state.db.get(body["id"]) is not None
+
+
+def test_add_hardcover_skips_push_without_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))  # secret:hardcover_token resolves to "" (no vault)
+        client = TestClient(app)
+        r = client.post("/api/books/add_hardcover", json={"id": "55", "title": "Z", "author": "A"})
+        body = r.json()
+        assert body["added"] is True and body["hardcover_want"] is False
+        assert "token" in body["hardcover_error"].lower()
+
+
 def test_book_json_exposes_date_added_and_last_kindle_send():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
