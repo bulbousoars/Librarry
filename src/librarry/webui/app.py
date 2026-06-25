@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import secrets
 from dataclasses import asdict
@@ -15,7 +16,7 @@ from typing import Any
 
 import requests
 import yaml
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from librarry import __version__, hardcover
@@ -27,7 +28,8 @@ from librarry.kindle import is_loggable_send, send_to_kindle
 from librarry.users import User, UserStore
 from librarry.workers.check import run_checks
 from librarry.workers.hardcover_sync import sync_hardcover
-from librarry.workers.import_book import import_ready, scan_library
+from librarry.metadata import optimize_ebook
+from librarry.workers.import_book import EBOOK_EXTS, _safe_name, import_ready, scan_library
 from librarry.workers import annas as annas_worker
 from librarry.workers import libgen as libgen_worker
 from librarry.workers.libgen import fetch_libgen
@@ -729,6 +731,61 @@ def create_app(config_path: str) -> FastAPI:
                 kindle_to=kindle_to or "", status=status, source="resend",
             )
         return {"sent": True, "book_id": book.id}
+
+    @app.post("/api/books/{book_id:path}/replace_file")
+    async def api_replace_file(book_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+        """Replace a book's library file with a manually-supplied one (e.g. a
+        better edition from Anna's Archive). Handles a format change (PDF→EPUB),
+        re-embeds cover/metadata, updates size/format, and removes the old file."""
+        book = _db().get(book_id)
+        if not book:
+            raise HTTPException(404, "book not found")
+        ext = Path(file.filename or "").suffix.lower().lstrip(".")
+        if not ext or f".{ext}" not in EBOOK_EXTS:
+            raise HTTPException(
+                400, f"unsupported file type {file.filename!r}; allowed: {', '.join(sorted(EBOOK_EXTS))}"
+            )
+        data = await file.read()
+        if not data:
+            raise HTTPException(400, "uploaded file is empty")
+
+        cfg = app.state.cfg
+        lib = Path(cfg.library_dir).resolve()
+        dest_dir = lib / _safe_name(book.author or "Unknown")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{_safe_name(book.title)}.{ext}"
+
+        tmp = dest.with_name(dest.name + ".uploading")
+        tmp.write_bytes(data)
+        os.replace(tmp, dest)
+
+        # Remove the previous file if it lived elsewhere (sandboxed to library_dir).
+        if book.library_path:
+            old = Path(book.library_path)
+            try:
+                if old.resolve() != dest.resolve() and lib in old.resolve().parents:
+                    old.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        try:
+            result = optimize_ebook(cfg, book, dest)
+            log.info("Replaced file for %r (%s); optimized=%s", book.title, ext, result.get("optimized"))
+        except Exception as exc:
+            log.warning("optimize after replace failed for %r: %s", book.title, exc)
+        if hasattr(os, "chown"):
+            for p in (dest_dir, dest):
+                try:
+                    os.chown(p, 1000, 1000)
+                except (PermissionError, OSError):
+                    pass
+
+        _db().mark_imported(book.id, str(dest), ext)
+        try:
+            _db().set_size(book.id, dest.stat().st_size)
+        except OSError:
+            pass
+        return _book_json(_db().get(book.id))
 
     @app.get("/api/books/{book_id:path}")
     def api_book_detail(book_id: str) -> dict[str, Any]:
@@ -2129,6 +2186,12 @@ _PAGE_HTML = """<!DOCTYPE html>
         </div>
         ${b.description ? `<div class="panel"><h3>Description</h3><div style="white-space:pre-wrap;line-height:1.5">${esc(b.description)}</div></div>` : ''}
         <div class="panel">
+          <h3>Replace file</h3>
+          <div class="muted" style="margin-bottom:0.6rem">Upload a different edition (e.g. one you got from Anna's Archive) to replace this book's file. The Hardcover cover &amp; metadata are re-embedded and a format change (e.g. PDF → EPUB) is handled automatically.</div>
+          <div class="field"><input type="file" id="replaceFile" accept=".epub,.azw3,.mobi,.pdf,.fb2,.djvu"></div>
+          <button class="primary" onclick="VIEWS.replaceBookFile('${esc(b.id)}')">Upload &amp; replace</button>
+        </div>
+        <div class="panel">
           <h3>Book Notes</h3>
           <div class="field"><label>Tags</label><input type="text" id="book_tags" value="${esc(b.tags||'')}"></div>
           <div class="field"><label>Cover override URL</label><input type="text" id="book_cover_override" value="${esc(b.cover_override_url||'')}"></div>
@@ -2156,6 +2219,23 @@ _PAGE_HTML = """<!DOCTYPE html>
         await VIEWS.book(id);
       } catch (err) {
         toast('Kindle send failed: ' + err.message);
+      }
+    };
+
+    VIEWS.replaceBookFile = async (id) => {
+      const inp = document.getElementById('replaceFile');
+      const f = inp && inp.files && inp.files[0];
+      if (!f) { toast('Choose a file first'); return; }
+      const fd = new FormData(); fd.append('file', f);
+      try {
+        toast('Uploading ' + f.name + '…');
+        const r = await fetch('/api/books/' + encodeURIComponent(id) + '/replace_file', { method: 'POST', body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || r.statusText);
+        toast('Replaced file for this book');
+        await VIEWS.book(id);
+      } catch (err) {
+        toast('Replace failed: ' + err.message);
       }
     };
 

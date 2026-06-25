@@ -782,6 +782,77 @@ def test_smtp_credentials_saved_to_vault_and_kept_when_blank():
         assert resolver.vault.get("kindle_smtp_password", key_file=resolver.key_file) == "app-secret-pw"
 
 
+def _minimal_epub_bytes() -> bytes:
+    import io, zipfile
+    opf = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bid">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">'
+        '<dc:identifier id="bid">x</dc:identifier><dc:title>Old</dc:title><dc:language>en</dc:language>'
+        '</metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest>'
+        '<spine><itemref idref="c1"/></spine></package>'
+    )
+    container = (
+        '<?xml version="1.0"?><container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+        '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+        '</rootfiles></container>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", container)
+        z.writestr("OEBPS/content.opf", opf)
+        z.writestr("OEBPS/c1.xhtml", "<html><body>hi</body></html>")
+    return buf.getvalue()
+
+
+def test_replace_file_swaps_reimports_and_removes_old():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+        db = app.state.db
+
+        bid = db.add_manual("Some Book", "Some Author")
+        oldfile = root / "library" / "Some Author" / "Some Book.pdf"
+        oldfile.parent.mkdir(parents=True)
+        oldfile.write_bytes(b"old pdf bytes")
+        db.mark_imported(bid, str(oldfile), "pdf")
+
+        epub = _minimal_epub_bytes()
+        r = client.post(
+            f"/api/books/{bid}/replace_file",
+            files={"file": ("Replacement From Annas.epub", epub, "application/epub+zip")},
+        )
+        assert r.status_code == 200
+        b = r.json()
+        # format changed pdf -> epub; named from the clean title
+        assert b["format"] == "epub"
+        assert b["library_path"].endswith("Some Book.epub")
+        newp = Path(b["library_path"])
+        assert newp.is_file()
+        assert b["size_bytes"] == newp.stat().st_size
+        # old file removed
+        assert not oldfile.exists()
+
+
+def test_replace_file_rejects_unsupported_type():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _write_config(root)
+        app = create_app(str(config))
+        client = TestClient(app)
+        bid = app.state.db.add_manual("Book", "Author")
+        r = client.post(
+            f"/api/books/{bid}/replace_file",
+            files={"file": ("notabook.txt", b"hello", "text/plain")},
+        )
+        assert r.status_code == 400
+        assert "unsupported" in r.json()["detail"].lower()
+
+
 def test_hardcover_token_saved_to_vault_and_reflected():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

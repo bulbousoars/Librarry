@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pymupdf>=1.24",  # PDF cover/metadata embedding for Kindle
+    "python-multipart>=0.0.9",  # file uploads (replace book file)
 ]
 
 [project.optional-dependencies]
