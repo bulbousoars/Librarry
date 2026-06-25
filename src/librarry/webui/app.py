@@ -1928,9 +1928,9 @@ _PAGE_HTML = """<!DOCTYPE html>
         cell:b=>`<span class="status status-${esc(b.status)}">${esc(STATUS_LABEL[b.status]||b.status)}</span>` },
       { key:'author', label:'Author', def:true, get:b=>b.author||'',
         cell:b=>`<a href="#author:${encodeURIComponent(b.author||'Unknown')}">${esc(b.author||'Unknown')}</a>` },
-      { key:'title', label:'Title', def:true, get:b=>b.title||'',
+      { key:'title', label:'Title', def:true, art:true, get:b=>b.title||'',
         cell:b=>`<a href="#book:${encodeURIComponent(b.id)}">${esc(b.title||'')}</a>` },
-      { key:'series', label:'Series', def:true, get:b=>seriesText(b) },
+      { key:'series', label:'Series', def:true, art:true, get:b=>seriesText(b) },
       { key:'genres', label:'Genre', def:true, get:b=>b.genres||'' },
       { key:'rating', label:'Rating', num:true, def:true, get:b=>b.rating,
         cell:b=> b.rating!=null ? `${Number(b.rating).toFixed(2)} ★` : '' },
@@ -2070,6 +2070,8 @@ _PAGE_HTML = """<!DOCTYPE html>
         let va = col.get(a), vb = col.get(b);
         if (col.num) { va = (va==null||va===''?-Infinity:Number(va)); vb = (vb==null||vb===''?-Infinity:Number(vb)); return (va-vb)*dir; }
         va = (va==null?'':String(va)).toLowerCase(); vb = (vb==null?'':String(vb)).toLowerCase();
+        // Ignore a leading article ("The/A/An") when sorting titles, like Kindle.
+        if (col.art) { va = va.replace(/^(the|a|an)\\s+/, ''); vb = vb.replace(/^(the|a|an)\\s+/, ''); }
         return va < vb ? -dir : va > vb ? dir : 0;
       });
       document.getElementById('libhead').innerHTML = `<tr>${cols.map(c => {
