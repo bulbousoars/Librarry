@@ -22,9 +22,13 @@ def test_send_to_kindle_uses_title_only_for_email_subject(tmp_path, monkeypatch)
         def send_message(self, msg):
             sent["subject"] = msg["Subject"]
             sent["to"] = msg["To"]
+            for part in msg.iter_attachments():
+                sent["attachment"] = part.get_filename()
 
     monkeypatch.setattr("smtplib.SMTP_SSL", FakeSMTP)
-    book = tmp_path / "book.epub"
+    # The on-disk name carries the messy "Title - Author" style; Kindle must not
+    # show that — it should use the clean title for the attachment filename.
+    book = tmp_path / "The Way of Kings - Brandon Sanderson.epub"
     book.write_bytes(b"epub")
     cfg = types.SimpleNamespace(
         send_kindle=True,
@@ -42,6 +46,7 @@ def test_send_to_kindle_uses_title_only_for_email_subject(tmp_path, monkeypatch)
     assert status == "sent"
     assert sent["subject"] == "The Way of Kings"
     assert sent["to"] == "reader@kindle.com"
+    assert sent["attachment"] == "The Way of Kings.epub"
 
 
 def test_send_to_kindle_returns_skip_statuses(tmp_path):

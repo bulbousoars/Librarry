@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -12,6 +13,18 @@ from librarry.config import AppConfig
 log = logging.getLogger(__name__)
 
 KINDLE_MAX_BYTES = 49 * 1024 * 1024  # Amazon ~50MB limit
+
+
+def _attachment_filename(title: str, src: Path) -> str:
+    """Filename for the emailed attachment.
+
+    Amazon's Send-to-Kindle derives the document title shown on the device from
+    the attachment filename, so we name it after the clean book title rather than
+    the (often "Title - Author") on-disk filename. Falls back to the original
+    name if the title sanitizes to nothing.
+    """
+    safe = re.sub(r"\s+", " ", re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title or "")).strip()
+    return f"{safe}{src.suffix}" if safe else src.name
 
 # Statuses worth recording in the send history (skip the noisy config states
 # "skipped_disabled" / "skipped_no_creds").
@@ -64,7 +77,7 @@ def send_to_kindle(
         book_path.read_bytes(),
         maintype=maintype,
         subtype=subtype,
-        filename=book_path.name,
+        filename=_attachment_filename(title, book_path),
     )
 
     if cfg.kindle_smtp_ssl:
